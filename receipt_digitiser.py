@@ -56,11 +56,11 @@ st.title("🧾 AI Receipt Digitizer & Reconciler")
 
 with st.sidebar:
     st.header("Instructions")
-    st.markdown("Upload close-up photos or snap a live picture. The AI will stitch them logically if they belong to the same transaction.")
+    st.markdown("Upload close-up photos or snap live pictures using the camera. The AI will stitch them logically if they belong to the same transaction.")
     st.markdown("---")
     st.markdown("**Note:** Your Gemini API Key is securely loaded from Streamlit Secrets.")
 
-# --- NEW: TABBED IMAGE INPUT (Upload vs Camera) ---
+# --- IMAGE INPUT TABS (Upload Files vs Multi-Snap Camera) ---
 st.subheader("1. Add Receipt Images")
 tab1, tab2 = st.tabs(["📁 Upload Files", "📸 Take Photo"])
 
@@ -68,14 +68,35 @@ with tab1:
     uploaded_files = st.file_uploader("Upload Receipt Images (JPG/PNG)", accept_multiple_files=True, type=['jpg', 'jpeg', 'png'])
 
 with tab2:
-    camera_photo = st.camera_input("Snap a live photo of your receipt")
+    st.info("📸 Snap as many parts of the receipt as you need. They will compile below.")
+    
+    # Session state initialization for camera batching
+    if 'camera_snaps' not in st.session_state:
+        st.session_state.camera_snaps = []
+        
+    new_snap = st.camera_input("Snap a live photo")
+    
+    if new_snap is not None:
+        if new_snap not in st.session_state.camera_snaps:
+            st.session_state.camera_snaps.append(new_snap)
+            
+    if st.session_state.camera_snaps:
+        st.success(f"{len(st.session_state.camera_snaps)} camera photo(s) queued!")
+        cols = st.columns(min(len(st.session_state.camera_snaps), 5))
+        for i, snap in enumerate(st.session_state.camera_snaps):
+            with cols[i % 5]:
+                st.image(snap, use_container_width=True)
+                
+        if st.button("🗑️ Clear Camera Batch"):
+            st.session_state.camera_snaps = []
+            st.rerun()
 
-# Combine inputs: users can upload multiple pieces of a long receipt AND take a photo of another piece.
+# --- COMBINE ALL IMAGE INPUTS ---
 all_image_files = []
 if uploaded_files:
     all_image_files.extend(uploaded_files)
-if camera_photo:
-    all_image_files.append(camera_photo)
+if 'camera_snaps' in st.session_state and st.session_state.camera_snaps:
+    all_image_files.extend(st.session_state.camera_snaps)
 
 # --- PROCESS BUTTON ---
 st.write("---")
@@ -88,7 +109,7 @@ if st.button("✨ Process Receipts", type="primary"):
             api_key = st.secrets["GEMINI_API_KEY"]
             genai.configure(api_key=api_key)
             
-            # Using 1.5 Pro for best multi-image context and text extraction
+            # Use gemini-1.5-pro (or gemini-1.5-flash for faster/cheaper runs)
             model = genai.GenerativeModel('gemini-1.5-pro') 
             
             with st.spinner("Analyzing and stitching images... enforcing math guardrails..."):
@@ -107,7 +128,7 @@ if st.button("✨ Process Receipts", type="primary"):
                 st.success("Extraction complete!")
                 
         except KeyError:
-             st.error("Missing API Key: Please ensure 'GEMINI_API_KEY' is added to your Streamlit App Secrets.")
+            st.error("Missing API Key: Please ensure 'GEMINI_API_KEY' is added to your Streamlit App Secrets.")
         except Exception as e:
             st.error(f"An error occurred: {e}")
 
