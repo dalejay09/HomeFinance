@@ -3,11 +3,14 @@ import pandas as pd
 import json
 import google.generativeai as genai
 from PIL import Image
+import gspread
+from google.oauth2.service_account import Credentials
 
 # ==========================================
-# 1. CATEGORIZATION REFERENCE DICTIONARY
+# 1. DEFAULT FALLBACK CATEGORY DICTIONARY
 # ==========================================
-CATEGORY_MAPPING = {
+# Used only if the "coding" tab in Google Sheets cannot be accessed.
+DEFAULT_CATEGORY_MAPPING = {
     "FruitVeg": ["cucumber", "apples", "grapes", "mandarins", "onions", "tomatoes (fresh)"],
     "Dinners": ["tinned beans", "tinned tomatoes", "salsa", "noodles", "rice", "pasta", "frozen wedges", "stirfry sauce"],
     "Lunches": ["crackers", "muesli bars", "cookies", "biscuits", "honey"],
@@ -23,17 +26,21 @@ CATEGORY_MAPPING = {
 }
 
 # ==========================================
-# 2. PROMPT & GUARDRAILS
+# 2. DYNAMIC PROMPT BUILDER
 # ==========================================
-SYSTEM_PROMPT = f"""
+def build_system_prompt(mapping_dictionary):
+    """Generates the prompt dynamically injected with the latest category mappings."""
+    return f"""
 You are a strict, highly accurate receipt digitization assistant. 
 Your task is to extract line items from the provided receipt images and output them as a structured JSON list.
 
 ### CATEGORIZATION INSTRUCTIONS
 Analyze the 'Item Name' and assign a highly granular 'Subcategory' (e.g., 'cucumber', 'chips', 'tinned beans', 'ham'). 
 Then, map it to the most appropriate broad 'Category' based on this reference mapping:
-{json.dumps(CATEGORY_MAPPING, indent=2)}
+{json.dumps(mapping_dictionary, indent=2)}
 If the item doesn't fit perfectly, make your best logical guess based on the structure provided.
+
+**Discount Rule:** If a line item is a discount or promo reduction (e.g., a negative amount or labeled 'Discount'), you MUST assign it the exact same 'Category' and 'Subcategory' as the item it applies to (this is almost always the line item immediately preceding it on the receipt).
 
 ### STRICT PROCESSING GUARDRAILS
 1. No Mathematical Inference (Semantic Bleed Protection): Never auto-fill, infer, or guess a missing price based on past receipts or item names.
@@ -52,10 +59,40 @@ Output ONLY a raw JSON array of objects with the following keys exactly:
 # 3. HELPER FUNCTIONS
 # ==========================================
 def resize_image(image, max_size=(1024, 1024)):
-    """Resizes an image before sending it to Gemini to save bandwidth and API limits, 
-    while preserving enough resolution for OCR."""
+    """Resizes an image before sending it to Gemini to save bandwidth and API limits."""
     image.thumbnail(max_size, Image.Resampling.LANCZOS)
     return image
+
+def fetch_dynamic_categories():
+    """Attempts to fetch the 'coding' tab from Google Sheets to use as the brain."""
+    try:
+        creds_dict = json.loads(st.secrets["GCP_JSON_STRING"])
+        scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        client = gspread.authorize(creds)
+        
+        sheet_id = st.secrets["SPREADSHEET_ID"]
+        spreadsheet = client.open_by_key(sheet_id)
+        worksheet = spreadsheet.worksheet("coding")
+        
+        records = worksheet.get_all_records()
+        
+        dynamic_mapping = {}
+        for row in records:
+            cat = str(row.get("Category", "")).strip()
+            examples = str(row.get("Subcategory Examples", "")).strip()
+            if cat: # Only add if Category isn't blank
+                dynamic_mapping[cat] = examples
+                
+        if dynamic_mapping:
+            return dynamic_mapping
+    except Exception as e:
+        print(f"Could not load dynamic categories, falling back to default. {e}")
+        pass
+    
+    # Return None if it fails so the app knows to use the fallback
+    return None
+
 
 # ==========================================
 # 4. STREAMLIT APP LAYOUT & LOGIC
@@ -67,9 +104,9 @@ with st.sidebar:
     st.header("Instructions")
     st.markdown("Upload close-up photos or snap live pictures using the camera. The AI will stitch them logically if they belong to the same transaction.")
     st.markdown("---")
-    st.markdown("**Note:** Your Gemini API Key is securely loaded from Streamlit Secrets.")
+    st.markdown("**Note:** Your Gemini API Key and Google Sheets credentials are securely loaded from Streamlit Secrets.")
 
-# --- IMAGE INPUT TABS (Upload Files vs Multi-Snap Camera) ---
+# --- IMAGE INPUT TABS ---
 st.subheader("1. Add Receipt Images")
 tab1, tab2 = st.tabs(["📁 Upload Files", "📸 Take Photo"])
 
@@ -78,8 +115,6 @@ with tab1:
 
 with tab2:
     st.info("📸 Snap as many parts of the receipt as you need. They will compile below.")
-    
-    # Session state initialization for camera batching
     if 'camera_snaps' not in st.session_state:
         st.session_state.camera_snaps = []
         
@@ -100,7 +135,6 @@ with tab2:
             st.session_state.camera_snaps = []
             st.rerun()
 
-# --- COMBINE ALL IMAGE INPUTS ---
 all_image_files = []
 if uploaded_files:
     all_image_files.extend(uploaded_files)
@@ -116,11 +150,21 @@ if st.button("✨ Process Receipts", type="primary"):
         try:
             api_key = st.secrets["GEMINI_API_KEY"]
             genai.configure(api_key=api_key)
-            model = genai.GenerativeModel('gemini-3.8-flash') 
+            model = genai.GenerativeModel('gemini-1.5-flash') 
             
-            with st.spinner("Analyzing and stitching images... enforcing math guardrails..."):
+            with st.spinner("Fetching category rules and analyzing images..."):
+                
+                # 1. Try to get categories from the 'coding' sheet, otherwise use fallback
+                mapping_dict = fetch_dynamic_categories()
+                if not mapping_dict:
+                    mapping_dict = DEFAULT_CATEGORY_MAPPING
+                
+                # 2. Build the final prompt
+                final_prompt = build_system_prompt(mapping_dict)
+                
+                # 3. Process images
                 images = [resize_image(Image.open(file)) for file in all_image_files]
-                payload = [SYSTEM_PROMPT] + images
+                payload = [final_prompt] + images
                 
                 response = model.generate_content(payload)
                 
@@ -130,8 +174,8 @@ if st.button("✨ Process Receipts", type="primary"):
                 st.session_state['df'] = pd.DataFrame(data)
                 st.success("Extraction complete!")
                 
-        except KeyError:
-            st.error("Missing API Key: Please ensure 'GEMINI_API_KEY' is added to your Streamlit App Secrets.")
+        except KeyError as e:
+            st.error(f"Missing Secret: Please ensure {e} is added to your Streamlit App Secrets.")
         except Exception as e:
             st.error(f"An error occurred: {e}")
 
@@ -170,31 +214,19 @@ if 'df' in st.session_state:
     with col2:
         if st.button("☁️ Sync to Google Sheets"):
             try:
-                import gspread
-                from google.oauth2.service_account import Credentials
-                
                 with st.spinner("Connecting to Google Sheets..."):
-                    # 1. Load the secrets from the raw JSON string (foolproof method)
                     creds_dict = json.loads(st.secrets["GCP_JSON_STRING"])
-                    
-                    # 2. Authenticate using the Service Account
                     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
                     creds = Credentials.from_service_account_info(
                         creds_dict, scopes=scopes
                     )
                     client = gspread.authorize(creds)
                     
-                    # 3. Open the Spreadsheet securely using the hidden ID
                     sheet_id = st.secrets["SPREADSHEET_ID"]
                     spreadsheet = client.open_by_key(sheet_id)
-                    
-                    # 4. Connect to the exact tab named "receipts"
                     worksheet = spreadsheet.worksheet("receipts") 
                     
-                    # 5. Clean the dataframe (Google Sheets hates NaN/Null values)
                     df_upload = edited_df.fillna("")
-                    
-                    # 6. Append the rows to the bottom of the sheet!
                     worksheet.append_rows(df_upload.values.tolist())
                     
                 st.success("✅ Data securely synced to your Google Sheet!")
