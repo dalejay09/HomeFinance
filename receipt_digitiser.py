@@ -150,7 +150,9 @@ if st.button("✨ Process Receipts", type="primary"):
         try:
             api_key = st.secrets["GEMINI_API_KEY"]
             genai.configure(api_key=api_key)
-            model = genai.GenerativeModel('gemini-1.5-flash') 
+            
+            # 🚀 Updated to the latest 3.8 Flash model!
+            model = genai.GenerativeModel('gemini-3.8-flash') 
             
             with st.spinner("Fetching category rules and analyzing images..."):
                 
