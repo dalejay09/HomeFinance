@@ -89,7 +89,7 @@ if st.button("✨ Process Receipts", type="primary"):
             genai.configure(api_key=api_key)
             
             # Using 1.5 Pro for best multi-image context and text extraction
-            model = genai.GenerativeModel('gemini-1.5-pro') 
+            model = genai.GenerativeModel('gemini-1.5-flash') 
             
             with st.spinner("Analyzing and stitching images... enforcing math guardrails..."):
                 # Prepare payload
