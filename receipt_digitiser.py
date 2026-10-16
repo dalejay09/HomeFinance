@@ -116,7 +116,7 @@ if st.button("✨ Process Receipts", type="primary"):
         try:
             api_key = st.secrets["GEMINI_API_KEY"]
             genai.configure(api_key=api_key)
-            model = genai.GenerativeModel('gemini-1.5-flash') 
+            model = genai.GenerativeModel('gemini-3.8-flash') 
             
             with st.spinner("Analyzing and stitching images... enforcing math guardrails..."):
                 images = [resize_image(Image.open(file)) for file in all_image_files]
