@@ -173,25 +173,29 @@ if 'df' in st.session_state:
                 from google.oauth2.service_account import Credentials
                 
                 with st.spinner("Connecting to Google Sheets..."):
-                    # 1. Authenticate using the secret Service Account
+                    # 1. Load the secrets into a dictionary and FIX the newline characters
+                    creds_dict = dict(st.secrets["gcp_service_account"])
+                    creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+                    
+                    # 2. Authenticate using the cleaned Service Account
                     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
                     creds = Credentials.from_service_account_info(
-                        st.secrets["gcp_service_account"], scopes=scopes
+                        creds_dict, scopes=scopes
                     )
                     client = gspread.authorize(creds)
                     
-                    # 2. Open the Spreadsheet securely using the hidden ID
+                    # 3. Open the Spreadsheet securely using the hidden ID
                     sheet_id = st.secrets["SPREADSHEET_ID"]
                     spreadsheet = client.open_by_key(sheet_id)
                     
-                    # Ensure it writes to the correct tab (e.g., "Sheet1" or "Master")
-                    # Update "Sheet1" to the exact name of your tab if it is different
+                    # IMPORTANT: Update "Sheet1" below to whatever the exact name of your tab is 
+                    # (e.g., "Receipts" or "Master" or "Sheet1")
                     worksheet = spreadsheet.worksheet("Sheet1") 
                     
-                    # 3. Clean the dataframe (Google Sheets hates NaN/Null values)
+                    # 4. Clean the dataframe (Google Sheets hates NaN/Null values)
                     df_upload = edited_df.fillna("")
                     
-                    # 4. Append the rows to the bottom of the sheet!
+                    # 5. Append the rows to the bottom of the sheet!
                     worksheet.append_rows(df_upload.values.tolist())
                     
                 st.success("✅ Data securely synced to your Google Sheet!")
