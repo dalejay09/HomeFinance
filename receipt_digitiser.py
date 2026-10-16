@@ -49,7 +49,16 @@ Output ONLY a raw JSON array of objects with the following keys exactly:
 """
 
 # ==========================================
-# 3. STREAMLIT APP LAYOUT & LOGIC
+# 3. HELPER FUNCTIONS
+# ==========================================
+def resize_image(image, max_size=(1024, 1024)):
+    """Resizes an image before sending it to Gemini to save bandwidth and API limits, 
+    while preserving enough resolution for OCR."""
+    image.thumbnail(max_size, Image.Resampling.LANCZOS)
+    return image
+
+# ==========================================
+# 4. STREAMLIT APP LAYOUT & LOGIC
 # ==========================================
 st.set_page_config(page_title="Receipt Digitizer", layout="wide")
 st.title("🧾 AI Receipt Digitizer & Reconciler")
@@ -109,12 +118,12 @@ if st.button("✨ Process Receipts", type="primary"):
             api_key = st.secrets["GEMINI_API_KEY"]
             genai.configure(api_key=api_key)
             
-            # Use gemini-1.5-pro (or gemini-1.5-flash for faster/cheaper runs)
-            model = genai.GenerativeModel('gemini-3.6-flash') 
+            # Using current 1.5 Flash model
+            model = genai.GenerativeModel('gemini-1.5-flash') 
             
             with st.spinner("Analyzing and stitching images... enforcing math guardrails..."):
-                # Prepare payload
-                images = [Image.open(file) for file in all_image_files]
+                # Prepare payload, passing images through the resizer first
+                images = [resize_image(Image.open(file)) for file in all_image_files]
                 payload = [SYSTEM_PROMPT] + images
                 
                 # Call Gemini
@@ -155,7 +164,7 @@ if 'df' in st.session_state:
         num_rows="dynamic"
     )
     
-# Export / Sync Options
+    # --- EXPORT / SYNC OPTIONS ---
     st.write("---")
     col1, col2 = st.columns(2)
     with col1:
@@ -188,14 +197,13 @@ if 'df' in st.session_state:
                     sheet_id = st.secrets["SPREADSHEET_ID"]
                     spreadsheet = client.open_by_key(sheet_id)
                     
-                    # IMPORTANT: Update "Sheet1" below to whatever the exact name of your tab is 
-                    # (e.g., "Receipts" or "Master" or "Sheet1")
-                    worksheet = spreadsheet.worksheet("Sheet1") 
+                    # 4. Connect to the exact tab named "receipts"
+                    worksheet = spreadsheet.worksheet("receipts") 
                     
-                    # 4. Clean the dataframe (Google Sheets hates NaN/Null values)
+                    # 5. Clean the dataframe (Google Sheets hates NaN/Null values)
                     df_upload = edited_df.fillna("")
                     
-                    # 5. Append the rows to the bottom of the sheet!
+                    # 6. Append the rows to the bottom of the sheet!
                     worksheet.append_rows(df_upload.values.tolist())
                     
                 st.success("✅ Data securely synced to your Google Sheet!")
