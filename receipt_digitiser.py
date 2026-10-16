@@ -110,7 +110,7 @@ if st.button("✨ Process Receipts", type="primary"):
             genai.configure(api_key=api_key)
             
             # Use gemini-1.5-pro (or gemini-1.5-flash for faster/cheaper runs)
-            model = genai.GenerativeModel('gemini-1.5-pro') 
+            model = genai.GenerativeModel('gemini-3.6-flash') 
             
             with st.spinner("Analyzing and stitching images... enforcing math guardrails..."):
                 # Prepare payload
