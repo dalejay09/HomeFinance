@@ -118,8 +118,8 @@ if st.button("✨ Process Receipts", type="primary"):
             api_key = st.secrets["GEMINI_API_KEY"]
             genai.configure(api_key=api_key)
             
-            # Using current 1.5 Flash model
-            model = genai.GenerativeModel('gemini-1.5-flash') 
+            # Using current 3.8 Flash model
+            model = genai.GenerativeModel('gemini-3.8-flash') 
             
             with st.spinner("Analyzing and stitching images... enforcing math guardrails..."):
                 # Prepare payload, passing images through the resizer first
