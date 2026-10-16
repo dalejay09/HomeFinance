@@ -114,22 +114,16 @@ if st.button("✨ Process Receipts", type="primary"):
         st.warning("Please upload or snap at least one image.")
     else:
         try:
-            # Load API key securely from Streamlit Secrets
             api_key = st.secrets["GEMINI_API_KEY"]
             genai.configure(api_key=api_key)
-            
-            # Using current 3.8 Flash model
-            model = genai.GenerativeModel('gemini-3.8-flash') 
+            model = genai.GenerativeModel('gemini-1.5-flash') 
             
             with st.spinner("Analyzing and stitching images... enforcing math guardrails..."):
-                # Prepare payload, passing images through the resizer first
                 images = [resize_image(Image.open(file)) for file in all_image_files]
                 payload = [SYSTEM_PROMPT] + images
                 
-                # Call Gemini
                 response = model.generate_content(payload)
                 
-                # Parse JSON (cleaning markdown block formatting if present)
                 raw_text = response.text.replace("```json", "").replace("```", "").strip()
                 data = json.loads(raw_text)
                 
@@ -146,7 +140,6 @@ if 'df' in st.session_state:
     st.subheader("2. Review & Edit Data")
     st.info("💡 Edit any rows with 'Low' confidence or 'Reconciled: No' directly in the table below.")
     
-    # Highlight rows that failed reconciliation or have low confidence
     def highlight_flags(row):
         if row['Reconciled'] == 'No' or row['Confidence'] == 'Low':
             return ['background-color: #ffcccc'] * len(row)
@@ -156,7 +149,6 @@ if 'df' in st.session_state:
 
     styled_df = st.session_state['df'].style.apply(highlight_flags, axis=1)
     
-    # Editable Dataframe
     edited_df = st.data_editor(
         styled_df, 
         use_container_width=True, 
@@ -182,11 +174,10 @@ if 'df' in st.session_state:
                 from google.oauth2.service_account import Credentials
                 
                 with st.spinner("Connecting to Google Sheets..."):
-                    # 1. Load the secrets into a dictionary and FIX the newline characters
-                    creds_dict = dict(st.secrets["gcp_service_account"])
-                    creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+                    # 1. Load the secrets from the raw JSON string (foolproof method)
+                    creds_dict = json.loads(st.secrets["GCP_JSON_STRING"])
                     
-                    # 2. Authenticate using the cleaned Service Account
+                    # 2. Authenticate using the Service Account
                     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
                     creds = Credentials.from_service_account_info(
                         creds_dict, scopes=scopes
@@ -210,5 +201,7 @@ if 'df' in st.session_state:
                 
             except KeyError as e:
                 st.error(f"Missing Secret: Ensure {e} is added to Streamlit Secrets.")
+            except json.JSONDecodeError:
+                st.error("Failed to parse JSON. Please ensure you pasted the exact contents of the JSON file between the ''' quotes in Streamlit Secrets.")
             except Exception as e:
                 st.error(f"Failed to sync: {e}")
