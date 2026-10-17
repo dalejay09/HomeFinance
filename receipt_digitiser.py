@@ -45,11 +45,13 @@ If the item doesn't fit perfectly, make your best logical guess based on the str
 ### STRICT PROCESSING GUARDRAILS
 1. No Mathematical Inference (Semantic Bleed Protection): Never auto-fill, infer, or guess a missing price based on past receipts or item names.
 2. Blanking: If a value is physically erased, chopped off, or illegible, output null (without quotes) for that JSON value. Do NOT use the word 'BLANK' or zero.
-3. Confidence Scoring: 
+3. Date Formatting: All dates MUST be returned in the format DD/MM/YYYY.
+4. Invoice Fallback: If a clear 'Invoice Number' is not found, extract any identifying code on the receipt that can serve as a unique transaction ID (e.g., a transaction number, authorization ID, or till receipt number).
+5. Confidence Scoring: 
    - 'High': Text is crisp and perfectly aligned.
    - 'Medium': Minor visual artifacts or slight fading, but highly probable.
    - 'Low': Obscured, heavy crinkles, misaligned, or partially destroyed. null values must always trigger a 'Low' score.
-4. Strict Reconciliation: Calculate the sum of all item Amounts (including negative discounts). If the calculated sum matches the printed Receipt Total exactly, mark Reconciled as 'Yes'. If there is ANY discrepancy, or if any value is null, mark Reconciled as 'No' for every row on that receipt.
+6. Strict Reconciliation: Calculate the sum of all item Amounts (including negative discounts). If the calculated sum matches the printed Receipt Total exactly, mark Reconciled as 'Yes'. If there is ANY discrepancy, or if any value is null, mark Reconciled as 'No' for every row on that receipt.
 
 Output ONLY a raw JSON array of objects with the following keys exactly:
 "Store Name", "Date", "Item Name", "Quantity", "Amount", "Invoice Number", "Receipt Total", "Reconciled", "Confidence", "Category", "Subcategory"
