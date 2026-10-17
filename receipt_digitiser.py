@@ -5,6 +5,7 @@ import google.generativeai as genai
 from PIL import Image
 import gspread
 from google.oauth2.service_account import Credentials
+import fitz  # PyMuPDF for PDF processing
 
 # ==========================================
 # 1. DEFAULT FALLBACK CATEGORY DICTIONARY
@@ -83,7 +84,7 @@ def fetch_dynamic_categories():
         for row in records:
             cat = str(row.get("Category", "")).strip()
             examples = str(row.get("Subcategory Examples", "")).strip()
-            if cat: # Only add if Category isn't blank
+            if cat: 
                 dynamic_mapping[cat] = examples
                 
         if dynamic_mapping:
@@ -92,9 +93,7 @@ def fetch_dynamic_categories():
         print(f"Could not load dynamic categories, falling back to default. {e}")
         pass
     
-    # Return None if it fails so the app knows to use the fallback
     return None
-
 
 # ==========================================
 # 4. STREAMLIT APP LAYOUT & LOGIC
@@ -104,16 +103,16 @@ st.title("🧾 AI Receipt Digitizer & Reconciler")
 
 with st.sidebar:
     st.header("Instructions")
-    st.markdown("Upload close-up photos or snap live pictures using the camera. The AI will stitch them logically if they belong to the same transaction.")
+    st.markdown("Upload close-up photos, PDFs, or snap live pictures using the camera. The AI will stitch them logically if they belong to the same transaction.")
     st.markdown("---")
     st.markdown("**Note:** Your Gemini API Key and Google Sheets credentials are securely loaded from Streamlit Secrets.")
 
 # --- IMAGE INPUT TABS ---
-st.subheader("1. Add Receipt Images")
+st.subheader("1. Add Receipts")
 tab1, tab2 = st.tabs(["📁 Upload Files", "📸 Take Photo"])
 
 with tab1:
-    uploaded_files = st.file_uploader("Upload Receipt Images (JPG/PNG)", accept_multiple_files=True, type=['jpg', 'jpeg', 'png'])
+    uploaded_files = st.file_uploader("Upload Receipts (JPG/PNG/PDF)", accept_multiple_files=True, type=['jpg', 'jpeg', 'png', 'pdf'])
 
 with tab2:
     st.info("📸 Snap as many parts of the receipt as you need. They will compile below.")
@@ -147,27 +146,36 @@ if 'camera_snaps' in st.session_state and st.session_state.camera_snaps:
 st.write("---")
 if st.button("✨ Process Receipts", type="primary"):
     if not all_image_files:
-        st.warning("Please upload or snap at least one image.")
+        st.warning("Please upload or snap at least one image/PDF.")
     else:
         try:
             api_key = st.secrets["GEMINI_API_KEY"]
             genai.configure(api_key=api_key)
-            
-            # 🚀 Updated to the latest 3.8 Flash model!
             model = genai.GenerativeModel('gemini-3.8-flash') 
             
-            with st.spinner("Fetching category rules and analyzing images..."):
-                
-                # 1. Try to get categories from the 'coding' sheet, otherwise use fallback
+            with st.spinner("Fetching category rules and analyzing files..."):
                 mapping_dict = fetch_dynamic_categories()
                 if not mapping_dict:
                     mapping_dict = DEFAULT_CATEGORY_MAPPING
                 
-                # 2. Build the final prompt
                 final_prompt = build_system_prompt(mapping_dict)
                 
-                # 3. Process images
-                images = [resize_image(Image.open(file)) for file in all_image_files]
+                # 🚀 NEW LOGIC: Check for PDFs and slice them into images
+                images = []
+                for file in all_image_files:
+                    # Check if it has a filename ending in .pdf
+                    if hasattr(file, 'name') and file.name.lower().endswith('.pdf'):
+                        # Read the PDF into PyMuPDF
+                        doc = fitz.open(stream=file.read(), filetype="pdf")
+                        for page in doc:
+                            # Render each page as a high-quality image
+                            pix = page.get_pixmap(dpi=150)
+                            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                            images.append(resize_image(img))
+                    else:
+                        # Standard image processing
+                        images.append(resize_image(Image.open(file)))
+                
                 payload = [final_prompt] + images
                 
                 response = model.generate_content(payload)
