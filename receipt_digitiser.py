@@ -7,6 +7,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 import fitz  # PyMuPDF for PDF processing
 import io
+import hashlib
 
 # ==========================================
 # 1. DEFAULT FALLBACK CATEGORY DICTIONARY
@@ -52,7 +53,7 @@ Output ONLY a raw JSON array of objects with keys:
 "Store Name", "Date", "Item Name", "Quantity", "Amount", "Invoice Number", "Receipt Total", "Reconciled", "Confidence", "Category", "Subcategory"
 """
 
-def build_bank_system_prompt(mapping_dictionary):
+def build_bank_csv_prompt(mapping_dictionary):
     return f"""
 You are an expert financial categorization assistant.
 I will provide you with a JSON array of raw bank transactions.
@@ -60,10 +61,31 @@ Your task is to assign a highly granular 'Subcategory' and map it to an exact 'C
 {json.dumps(mapping_dictionary, indent=2)}
 
 Rules:
-1. Output ONLY a raw JSON array of objects with the exact following keys: "Date", "Bank", "Payee / Description", "Amount", "Category", "Subcategory"
-2. Retain the exact original values for Date, Bank, Payee / Description, and Amount from the provided JSON.
+1. Output ONLY a raw JSON array of objects with the exact following keys: "Date", "Unique ID", "Account", "Bank", "Payee / Description", "Amount", "Category", "Subcategory"
+2. Retain the exact original values for Date, Unique ID, Account, Bank, Payee / Description, and Amount from the provided JSON.
 3. If the transaction is income (positive amount like salary or deposit), assign 'Income' unless mapping dictates otherwise.
 4. If it doesn't fit perfectly into the mapping, make your best logical guess based on the description.
+"""
+
+def build_bank_pdf_prompt(mapping_dictionary):
+    return f"""
+You are an expert financial categorization assistant.
+I will provide you with images of bank statements.
+Your task is to extract all line-item transactions from these statements and categorize them.
+
+### CATEGORIZATION INSTRUCTIONS
+Assign a highly granular 'Subcategory' and map it to an exact 'Category' based on this reference mapping:
+{json.dumps(mapping_dictionary, indent=2)}
+
+Rules:
+1. Output ONLY a raw JSON array of objects with the exact following keys: "Date", "Account", "Bank", "Payee / Description", "Amount", "Category", "Subcategory"
+2. 'Date': Use the format DD/MM/YYYY.
+3. 'Account': Extract the full account number shown on the statement.
+4. 'Bank': Deduce the bank name (e.g., ASB, ANZ).
+5. 'Amount': Extract as a number (use negative numbers for withdrawals/debits/purchases, positive for deposits/credits/payments).
+6. Combine the Payee, Particulars, Code, and Reference into the single 'Payee / Description' field.
+7. If the transaction is income (positive amount like salary or deposit), assign 'Income' unless mapping dictates otherwise.
+8. If it doesn't fit perfectly into the mapping, make your best logical guess based on the description.
 """
 
 # ==========================================
@@ -96,56 +118,73 @@ def fetch_dynamic_categories():
         if dynamic_mapping:
             return dynamic_mapping
     except Exception as e:
-        print(f"Could not load dynamic categories, falling back to default. {e}")
         pass
     return None
 
 def read_messy_bank_csv(uploaded_file):
-    """Reads a CSV file and dynamically skips metadata headers at the top"""
     lines = uploaded_file.getvalue().decode('utf-8').splitlines()
     if not lines:
-        return pd.DataFrame()
+        return pd.DataFrame(), "Unknown"
         
     start_row = 0
-    # Look for common header keywords that indicate the start of the data table
+    account_id = "Unknown"
+    
+    for line in lines[:15]:
+        if "Account " in line:
+            parts = line.split("Account ")
+            if len(parts) > 1:
+                account_id = parts[1].split()[0]
+                break
+        elif "Card Number " in line:
+            parts = line.split("Card Number ")
+            if len(parts) > 1:
+                account_id = parts[1].split()[0]
+                break
+
     for i, line in enumerate(lines):
         line_lower = line.lower()
-        if 'date' in line_lower and ('amount' in line_lower or 'payee' in line_lower or 'details' in line_lower):
+        if 'date' in line_lower and ('amount' in line_lower or 'payee' in line_lower or 'details' in line_lower or 'description' in line_lower):
             start_row = i
             break
             
-    # Reconstruct the valid CSV part
     valid_csv_lines = lines[start_row:]
     cleaned_csv = "\n".join(valid_csv_lines)
-    return pd.read_csv(io.StringIO(cleaned_csv))
+    return pd.read_csv(io.StringIO(cleaned_csv)), account_id
 
-def normalize_bank_df(df):
+def normalize_bank_df(df, account_id="Unknown"):
     cols = [str(c).strip() for c in df.columns]
     df.columns = cols
     
-    if 'Payee' in df.columns:
+    if 'Payee' in df.columns and 'Memo' in df.columns:
         bank = 'ASB'
         payee_col = 'Payee'
         amount_col = 'Amount'
         date_col = 'Date'
-        desc_parts = ['Payee', 'Particulars', 'Code', 'Reference']
-    elif 'Details' in df.columns:
+        desc_parts = ['Payee', 'Memo']
+        unique_id_col = 'Unique Id' if 'Unique Id' in df.columns else None
+    elif 'Description' in df.columns and ('Date Processed' in df.columns or 'Date of Transaction' in df.columns):
+        bank = 'ASB Credit'
+        payee_col = 'Description'
+        amount_col = 'Amount'
+        date_col = 'Date of Transaction' if 'Date of Transaction' in df.columns else 'Date Processed'
+        desc_parts = ['Description', 'Reference']
+        unique_id_col = 'Unique Id' if 'Unique Id' in df.columns else None
+    elif 'Details' in df.columns and 'Particulars' in df.columns:
         bank = 'ANZ'
         payee_col = 'Details'
         amount_col = 'Amount'
         date_col = 'Date'
         desc_parts = ['Details', 'Particulars', 'Code', 'Reference']
+        unique_id_col = None
     else:
         bank = 'Unknown'
         payee_col = df.columns[1] if len(df.columns) > 1 else df.columns[0]
-        
         amt_cols = [c for c in df.columns if 'amount' in str(c).lower() or 'amt' in str(c).lower()]
         amount_col = amt_cols[0] if amt_cols else df.columns[-2]
-        
         date_cols = [c for c in df.columns if 'date' in str(c).lower()]
         date_col = date_cols[0] if date_cols else df.columns[0]
-        
         desc_parts = [payee_col]
+        unique_id_col = None
 
     def make_desc(row):
         parts = []
@@ -157,32 +196,67 @@ def normalize_bank_df(df):
         return " - ".join(parts) if parts else str(row[payee_col])
 
     norm_df = pd.DataFrame()
-    
-    norm_df['Date'] = pd.to_datetime(
-        df[date_col], 
-        format='mixed', 
-        dayfirst=True, 
-        errors='coerce'
-    ).dt.strftime('%d/%m/%Y')
-    
+    norm_df['Date'] = pd.to_datetime(df[date_col], format='mixed', dayfirst=True, errors='coerce').dt.strftime('%d/%m/%Y')
+    norm_df['Account'] = [account_id] * len(df)
     norm_df['Bank'] = bank
     norm_df['Payee / Description'] = df.apply(make_desc, axis=1)
+    norm_df['Amount'] = pd.to_numeric(df[amount_col].astype(str).str.replace(r'[$,]', '', regex=True), errors='coerce')
     
-    norm_df['Amount'] = pd.to_numeric(
-        df[amount_col].astype(str).str.replace(r'[$,]', '', regex=True), 
-        errors='coerce'
-    )
+    # Generate Unique IDs
+    ids = []
+    seen_hashes = {}
     
+    for i in range(len(norm_df)):
+        row = norm_df.iloc[i]
+        orig_row = df.iloc[i]
+        
+        if unique_id_col and unique_id_col in df.columns and pd.notna(orig_row[unique_id_col]) and str(orig_row[unique_id_col]).strip() != "":
+            ids.append(str(orig_row[unique_id_col]).strip())
+        else:
+            bal_val = str(orig_row['Balance']).strip() if 'Balance' in df.columns else ''
+            raw_str = f"{row['Date']}_{row['Payee / Description']}_{row['Amount']}_{bal_val}"
+            base_hash = hashlib.md5(raw_str.encode('utf-8')).hexdigest()[:10]
+            
+            if base_hash in seen_hashes:
+                seen_hashes[base_hash] += 1
+                ids.append(f"{base_hash}-{seen_hashes[base_hash]}")
+            else:
+                seen_hashes[base_hash] = 1
+                ids.append(base_hash)
+
+    norm_df.insert(1, 'Unique ID', ids)
     norm_df['Category'] = ""
     norm_df['Subcategory'] = ""
     return norm_df
+
+def apply_missing_ids(df):
+    if 'Unique ID' not in df.columns:
+        df.insert(1, 'Unique ID', "")
+        
+    ids = []
+    seen_hashes = {}
+    for i, row in df.iterrows():
+        existing_id = str(row.get('Unique ID', '')).strip()
+        if existing_id and existing_id != "nan":
+            ids.append(existing_id)
+            seen_hashes[existing_id] = 1
+        else:
+            raw_str = f"{row.get('Date','')}_{row.get('Payee / Description','')}_{row.get('Amount','')}"
+            base_hash = hashlib.md5(raw_str.encode('utf-8')).hexdigest()[:10]
+            if base_hash in seen_hashes:
+                seen_hashes[base_hash] += 1
+                ids.append(f"{base_hash}-{seen_hashes[base_hash]}")
+            else:
+                seen_hashes[base_hash] = 1
+                ids.append(base_hash)
+    df['Unique ID'] = ids
+    return df
 
 # ==========================================
 # 4. STREAMLIT APP LAYOUT & LOGIC
 # ==========================================
 st.set_page_config(page_title="Finance Digitizer", layout="wide")
 
-# TOP LEVEL TABS
 main_tab1, main_tab2 = st.tabs(["🧾 Receipt Digitizer", "🏦 Bank Statements"])
 
 # ---------------------------------------------------------
@@ -190,7 +264,6 @@ main_tab1, main_tab2 = st.tabs(["🧾 Receipt Digitizer", "🏦 Bank Statements"
 # ---------------------------------------------------------
 with main_tab1:
     st.title("🧾 AI Receipt Digitizer")
-    
     st.markdown("Upload close-up photos, PDFs, or snap live pictures using the camera. The AI will stitch them logically if they belong to the same transaction.")
 
     # --- IMAGE INPUT TABS ---
@@ -320,48 +393,72 @@ with main_tab1:
 # TAB 2: BANK STATEMENTS
 # ---------------------------------------------------------
 with main_tab2:
-    st.title("🏦 Bank CSV Categorizer (ASB/ANZ)")
-    st.markdown("Upload raw CSV exports directly from your ASB or ANZ customer portal. The AI will normalize the format and apply your custom categories automatically.")
+    st.title("🏦 Bank CSV & PDF Categorizer")
+    st.markdown("Upload raw CSV exports or PDF statements directly from your bank. The AI will normalize the format, deduplicate, and apply your custom categories.")
 
-    st.subheader("1. Upload Bank CSV")
-    bank_csv_file = st.file_uploader("Upload Bank Export", key="bank_up")
+    st.subheader("1. Upload Bank File")
+    bank_file = st.file_uploader("Upload Bank Export (CSV or PDF)", type=['csv', 'pdf', 'png', 'jpg', 'jpeg'], key="bank_up")
 
     if st.button("✨ Categorize Transactions", type="primary"):
-        if not bank_csv_file:
-            st.warning("Please upload a CSV file.")
+        if not bank_file:
+            st.warning("Please upload a file.")
         else:
             try:
-                # 1. Normalize CSV (now dynamically skips ASB headers!)
-                raw_df = read_messy_bank_csv(bank_csv_file)
-                normalized_df = normalize_bank_df(raw_df)
-                
-                # 2. Convert to JSON payload for AI
-                bank_json_payload = normalized_df.to_json(orient="records")
-                
-                # 3. Call Gemini
                 api_key = st.secrets["GEMINI_API_KEY"]
                 genai.configure(api_key=api_key)
                 model = genai.GenerativeModel('gemini-3.8-flash') 
                 
-                with st.spinner("Normalizing CSV and applying category rules..."):
+                with st.spinner("Analyzing bank file and applying category rules..."):
                     mapping_dict = fetch_dynamic_categories()
                     if not mapping_dict:
                         mapping_dict = DEFAULT_CATEGORY_MAPPING
+
+                    is_csv = hasattr(bank_file, 'name') and bank_file.name.lower().endswith('.csv')
                     
-                    final_prompt = build_bank_system_prompt(mapping_dict)
-                    payload = [final_prompt, "Here are the transactions to categorize:", bank_json_payload]
-                    
+                    if is_csv:
+                        # Process CSV
+                        raw_df, extracted_account = read_messy_bank_csv(bank_file)
+                        normalized_df = normalize_bank_df(raw_df, extracted_account)
+                        bank_json_payload = normalized_df.to_json(orient="records")
+                        
+                        final_prompt = build_bank_csv_prompt(mapping_dict)
+                        payload = [final_prompt, "Here are the transactions to categorize:", bank_json_payload]
+                    else:
+                        # Process PDF / Images
+                        final_prompt = build_bank_pdf_prompt(mapping_dict)
+                        images = []
+                        if hasattr(bank_file, 'name') and bank_file.name.lower().endswith('.pdf'):
+                            doc = fitz.open(stream=bank_file.read(), filetype="pdf")
+                            for page in doc:
+                                pix = page.get_pixmap(dpi=150)
+                                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                                images.append(resize_image(img))
+                        else:
+                            images.append(resize_image(Image.open(bank_file)))
+                        
+                        payload = [final_prompt] + images
+
                     response = model.generate_content(payload)
                     raw_text = response.text.replace("```json", "").replace("```", "").strip()
                     categorized_data = json.loads(raw_text)
                     
-                    st.session_state['bank_df'] = pd.DataFrame(categorized_data)
+                    # Apply missing IDs (specifically needed for PDF extractions)
+                    result_df = apply_missing_ids(pd.DataFrame(categorized_data))
+                    
+                    # Enforce strict column order and fill missing
+                    col_order = ["Date", "Unique ID", "Account", "Bank", "Payee / Description", "Amount", "Category", "Subcategory"]
+                    for col in col_order:
+                        if col not in result_df.columns:
+                            result_df[col] = ""
+                    result_df = result_df[col_order]
+                    
+                    st.session_state['bank_df'] = result_df
                     st.success("Categorization complete!")
                     
             except KeyError as e:
                 st.error(f"Missing Secret: Please ensure {e} is added to your Streamlit App Secrets.")
             except Exception as e:
-                st.error(f"An error occurred: {e}. Ensure the file is a valid CSV.")
+                st.error(f"An error occurred: {e}. Please check the file and try again.")
 
     # --- DISPLAY AND EDIT DATA ---
     if 'bank_df' in st.session_state:
@@ -379,11 +476,11 @@ with main_tab2:
         col1, col2 = st.columns(2)
         with col1:
             csv = edited_bank_df.to_csv(index=False).encode('utf-8')
-            st.download_button("⬇️ Download Bank CSV", data=csv, file_name="categorized_bank_transactions.csv", mime="text/csv", key="dl_bank")
+            st.download_button("⬇️ Download Bank Data", data=csv, file_name="categorized_bank_transactions.csv", mime="text/csv", key="dl_bank")
         with col2:
-            if st.button("☁️ Sync Transactions to Google Sheets"):
+            if st.button("☁️ Sync Transactions to Accounts"):
                 try:
-                    with st.spinner("Connecting to Google Sheets..."):
+                    with st.spinner("Connecting to Google Sheets and routing accounts..."):
                         creds_dict = json.loads(st.secrets["GCP_JSON_STRING"])
                         scopes = ["https://www.googleapis.com/auth/spreadsheets"]
                         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
@@ -392,14 +489,43 @@ with main_tab2:
                         sheet_id = st.secrets["SPREADSHEET_ID"]
                         spreadsheet = client.open_by_key(sheet_id)
                         
+                        # Fetch optional routing map
+                        routing_map = {}
                         try:
-                            worksheet = spreadsheet.worksheet("bank_transactions") 
-                        except gspread.exceptions.WorksheetNotFound:
-                            worksheet = spreadsheet.add_worksheet(title="bank_transactions", rows="1000", cols="20")
-                            worksheet.append_row(["Date", "Bank", "Payee / Description", "Amount", "Category", "Subcategory"])
+                            routing_sheet = spreadsheet.worksheet("routing")
+                            for row in routing_sheet.get_all_records():
+                                routing_map[str(row.get("Account Number", "")).strip()] = str(row.get("Tab Name", "")).strip()
+                        except:
+                            pass
                             
                         df_upload = edited_bank_df.fillna("")
-                        worksheet.append_rows(df_upload.values.tolist())
-                    st.success("✅ Transactions synced securely!")
+                        accounts = df_upload['Account'].unique()
+                        
+                        synced_count = 0
+                        skipped_count = 0
+                        
+                        for acc in accounts:
+                            acc_str = str(acc).strip()
+                            tab_name = routing_map.get(acc_str, acc_str if acc_str and acc_str != "Unknown" else "bank_transactions")
+                            
+                            try:
+                                worksheet = spreadsheet.worksheet(tab_name) 
+                            except gspread.exceptions.WorksheetNotFound:
+                                worksheet = spreadsheet.add_worksheet(title=tab_name, rows="1000", cols="20")
+                                worksheet.append_row(list(df_upload.columns))
+                            
+                            existing_ids = worksheet.col_values(2) # Column B is Unique ID
+                            
+                            acc_df = df_upload[df_upload['Account'] == acc]
+                            # Drop exact ID matches to prevent duplication
+                            new_rows = acc_df[~acc_df['Unique ID'].astype(str).isin(existing_ids)]
+                            
+                            skipped_count += (len(acc_df) - len(new_rows))
+                            
+                            if not new_rows.empty:
+                                worksheet.append_rows(new_rows.values.tolist())
+                                synced_count += len(new_rows)
+                                
+                    st.success(f"✅ Success! {synced_count} new transactions synced. {skipped_count} existing duplicates skipped.")
                 except Exception as e:
                     st.error(f"Failed to sync: {e}")
