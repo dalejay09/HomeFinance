@@ -119,11 +119,9 @@ def normalize_bank_df(df):
         bank = 'Unknown'
         payee_col = df.columns[1] if len(df.columns) > 1 else df.columns[0]
         
-        # Safely find amount column for mobile copy
         amt_cols = [c for c in df.columns if 'amount' in str(c).lower() or 'amt' in str(c).lower()]
         amount_col = amt_cols[0] if amt_cols else df.columns[-2]
         
-        # Safely find date column for mobile copy
         date_cols = [c for c in df.columns if 'date' in str(c).lower()]
         date_col = date_cols[0] if date_cols else df.columns[0]
         
@@ -140,7 +138,6 @@ def normalize_bank_df(df):
 
     norm_df = pd.DataFrame()
     
-    # Formatting date safely
     norm_df['Date'] = pd.to_datetime(
         df[date_col], 
         format='mixed', 
@@ -151,7 +148,6 @@ def normalize_bank_df(df):
     norm_df['Bank'] = bank
     norm_df['Payee / Description'] = df.apply(make_desc, axis=1)
     
-    # Formatting amount safely
     norm_df['Amount'] = pd.to_numeric(
         df[amount_col].astype(str).str.replace(r'[$,]', '', regex=True), 
         errors='coerce'
@@ -308,7 +304,8 @@ with main_tab2:
     st.markdown("Upload raw CSV exports directly from your ASB or ANZ customer portal. The AI will normalize the format and apply your custom categories automatically.")
 
     st.subheader("1. Upload Bank CSV")
-    bank_csv_file = st.file_uploader("Upload Bank Export (.csv)", type=['csv'], key="bank_up")
+    # REMOVED the strict type=['csv'] restriction so Android allows any file selection
+    bank_csv_file = st.file_uploader("Upload Bank Export", key="bank_up")
 
     if st.button("✨ Categorize Transactions", type="primary"):
         if not bank_csv_file:
@@ -345,7 +342,7 @@ with main_tab2:
             except KeyError as e:
                 st.error(f"Missing Secret: Please ensure {e} is added to your Streamlit App Secrets.")
             except Exception as e:
-                st.error(f"An error occurred: {e}")
+                st.error(f"An error occurred: {e}. Ensure the file is a valid CSV.")
 
     # --- DISPLAY AND EDIT DATA ---
     if 'bank_df' in st.session_state:
@@ -376,11 +373,9 @@ with main_tab2:
                         sheet_id = st.secrets["SPREADSHEET_ID"]
                         spreadsheet = client.open_by_key(sheet_id)
                         
-                        # Assuming the user creates a tab called "bank_transactions"
                         try:
                             worksheet = spreadsheet.worksheet("bank_transactions") 
                         except gspread.exceptions.WorksheetNotFound:
-                            # Auto-create if missing
                             worksheet = spreadsheet.add_worksheet(title="bank_transactions", rows="1000", cols="20")
                             worksheet.append_row(["Date", "Bank", "Payee / Description", "Amount", "Category", "Subcategory"])
                             
