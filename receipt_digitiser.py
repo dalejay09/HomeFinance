@@ -6,6 +6,7 @@ from PIL import Image
 import gspread
 from google.oauth2.service_account import Credentials
 import fitz  # PyMuPDF for PDF processing
+import io
 
 # ==========================================
 # 1. DEFAULT FALLBACK CATEGORY DICTIONARY
@@ -99,8 +100,27 @@ def fetch_dynamic_categories():
         pass
     return None
 
+def read_messy_bank_csv(uploaded_file):
+    """Reads a CSV file and dynamically skips metadata headers at the top"""
+    lines = uploaded_file.getvalue().decode('utf-8').splitlines()
+    if not lines:
+        return pd.DataFrame()
+        
+    start_row = 0
+    # Look for common header keywords that indicate the start of the data table
+    for i, line in enumerate(lines):
+        line_lower = line.lower()
+        if 'date' in line_lower and ('amount' in line_lower or 'payee' in line_lower or 'details' in line_lower):
+            start_row = i
+            break
+            
+    # Reconstruct the valid CSV part
+    valid_csv_lines = lines[start_row:]
+    cleaned_csv = "\n".join(valid_csv_lines)
+    return pd.read_csv(io.StringIO(cleaned_csv))
+
 def normalize_bank_df(df):
-    cols = [c.strip() for c in df.columns]
+    cols = [str(c).strip() for c in df.columns]
     df.columns = cols
     
     if 'Payee' in df.columns:
@@ -304,7 +324,6 @@ with main_tab2:
     st.markdown("Upload raw CSV exports directly from your ASB or ANZ customer portal. The AI will normalize the format and apply your custom categories automatically.")
 
     st.subheader("1. Upload Bank CSV")
-    # REMOVED the strict type=['csv'] restriction so Android allows any file selection
     bank_csv_file = st.file_uploader("Upload Bank Export", key="bank_up")
 
     if st.button("✨ Categorize Transactions", type="primary"):
@@ -312,8 +331,8 @@ with main_tab2:
             st.warning("Please upload a CSV file.")
         else:
             try:
-                # 1. Normalize CSV
-                raw_df = pd.read_csv(bank_csv_file)
+                # 1. Normalize CSV (now dynamically skips ASB headers!)
+                raw_df = read_messy_bank_csv(bank_csv_file)
                 normalized_df = normalize_bank_df(raw_df)
                 
                 # 2. Convert to JSON payload for AI
