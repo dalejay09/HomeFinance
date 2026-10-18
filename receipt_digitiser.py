@@ -10,7 +10,6 @@ import fitz  # PyMuPDF for PDF processing
 # ==========================================
 # 1. DEFAULT FALLBACK CATEGORY DICTIONARY
 # ==========================================
-# Used only if the "coding" tab in Google Sheets cannot be accessed.
 DEFAULT_CATEGORY_MAPPING = {
     "FruitVeg": ["cucumber", "apples", "grapes", "mandarins", "onions", "tomatoes (fresh)"],
     "Dinners": ["tinned beans", "tinned tomatoes", "salsa", "noodles", "rice", "pasta", "frozen wedges", "stirfry sauce"],
@@ -27,47 +26,53 @@ DEFAULT_CATEGORY_MAPPING = {
 }
 
 # ==========================================
-# 2. DYNAMIC PROMPT BUILDER
+# 2. DYNAMIC PROMPT BUILDERS
 # ==========================================
-def build_system_prompt(mapping_dictionary):
-    """Generates the prompt dynamically injected with the latest category mappings."""
+def build_receipt_system_prompt(mapping_dictionary):
     return f"""
 You are a strict, highly accurate receipt digitization assistant. 
 Your task is to extract line items from the provided receipt images and output them as a structured JSON list.
 
 ### CATEGORIZATION INSTRUCTIONS
-Analyze the 'Item Name' and assign a highly granular 'Subcategory' (e.g., 'cucumber', 'chips', 'tinned beans', 'ham'). 
-Then, map it to the most appropriate broad 'Category' based on this reference mapping:
+Analyze the 'Item Name' and assign a highly granular 'Subcategory'. Then, map it to the most appropriate broad 'Category' based on this reference mapping:
 {json.dumps(mapping_dictionary, indent=2)}
-If the item doesn't fit perfectly, make your best logical guess based on the structure provided.
 
-**Discount Rule:** If a line item is a discount or promo reduction (e.g., a negative amount or labeled 'Discount'), you MUST assign it the exact same 'Category' and 'Subcategory' as the item it applies to (this is almost always the line item immediately preceding it on the receipt).
+**Discount Rule:** If a line item is a discount or promo reduction (e.g., a negative amount or labeled 'Discount'), you MUST assign it the exact same 'Category' and 'Subcategory' as the item it applies to.
 
 ### STRICT PROCESSING GUARDRAILS
-1. No Mathematical Inference (Semantic Bleed Protection): Never auto-fill, infer, or guess a missing price based on past receipts or item names.
-2. Blanking: If a value is physically erased, chopped off, or illegible, output null (without quotes) for that JSON value. Do NOT use the word 'BLANK' or zero.
+1. No Mathematical Inference: Never auto-fill, infer, or guess a missing price.
+2. Blanking: If a value is erased or illegible, output null (without quotes) for that JSON value. Do NOT use the word 'BLANK'.
 3. Date Formatting: All dates MUST be returned in the format DD/MM/YYYY.
-4. Invoice Fallback: If a clear 'Invoice Number' is not found, extract any identifying code on the receipt that can serve as a unique transaction ID (e.g., a transaction number, authorization ID, or till receipt number).
-5. Confidence Scoring: 
-   - 'High': Text is crisp and perfectly aligned.
-   - 'Medium': Minor visual artifacts or slight fading, but highly probable.
-   - 'Low': Obscured, heavy crinkles, misaligned, or partially destroyed. null values must always trigger a 'Low' score.
-6. Strict Reconciliation: Calculate the sum of all item Amounts (including negative discounts). If the calculated sum matches the printed Receipt Total exactly, mark Reconciled as 'Yes'. If there is ANY discrepancy, or if any value is null, mark Reconciled as 'No' for every row on that receipt.
+4. Invoice Fallback: If a clear 'Invoice Number' is not found, extract any identifying code on the receipt that can serve as a unique transaction ID.
+5. Confidence Scoring: 'High' (perfect), 'Medium' (probable), 'Low' (obscured). null values must always trigger 'Low'.
+6. Strict Reconciliation: If the calculated sum of items matches the Receipt Total exactly, mark Reconciled as 'Yes'. Otherwise, or if any value is null, mark 'No'.
 
-Output ONLY a raw JSON array of objects with the following keys exactly:
+Output ONLY a raw JSON array of objects with keys:
 "Store Name", "Date", "Item Name", "Quantity", "Amount", "Invoice Number", "Receipt Total", "Reconciled", "Confidence", "Category", "Subcategory"
+"""
+
+def build_bank_system_prompt(mapping_dictionary):
+    return f"""
+You are an expert financial categorization assistant.
+I will provide you with a JSON array of raw bank transactions.
+Your task is to assign a highly granular 'Subcategory' and map it to an exact 'Category' based on this reference mapping:
+{json.dumps(mapping_dictionary, indent=2)}
+
+Rules:
+1. Output ONLY a raw JSON array of objects with the exact following keys: "Date", "Bank", "Payee / Description", "Amount", "Category", "Subcategory"
+2. Retain the exact original values for Date, Bank, Payee / Description, and Amount from the provided JSON.
+3. If the transaction is income (positive amount like salary or deposit), assign 'Income' unless mapping dictates otherwise.
+4. If it doesn't fit perfectly into the mapping, make your best logical guess based on the description.
 """
 
 # ==========================================
 # 3. HELPER FUNCTIONS
 # ==========================================
 def resize_image(image, max_size=(1024, 1024)):
-    """Resizes an image before sending it to Gemini to save bandwidth and API limits."""
     image.thumbnail(max_size, Image.Resampling.LANCZOS)
     return image
 
 def fetch_dynamic_categories():
-    """Attempts to fetch the 'coding' tab from Google Sheets to use as the brain."""
     try:
         creds_dict = json.loads(st.secrets["GCP_JSON_STRING"])
         scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
@@ -92,160 +97,25 @@ def fetch_dynamic_categories():
     except Exception as e:
         print(f"Could not load dynamic categories, falling back to default. {e}")
         pass
-    
     return None
 
-# ==========================================
-# 4. STREAMLIT APP LAYOUT & LOGIC
-# ==========================================
-st.set_page_config(page_title="Receipt Digitizer", layout="wide")
-st.title("🧾 AI Receipt Digitizer & Reconciler")
-
-with st.sidebar:
-    st.header("Instructions")
-    st.markdown("Upload close-up photos, PDFs, or snap live pictures using the camera. The AI will stitch them logically if they belong to the same transaction.")
-    st.markdown("---")
-    st.markdown("**Note:** Your Gemini API Key and Google Sheets credentials are securely loaded from Streamlit Secrets.")
-
-# --- IMAGE INPUT TABS ---
-st.subheader("1. Add Receipts")
-tab1, tab2 = st.tabs(["📁 Upload Files", "📸 Take Photo"])
-
-with tab1:
-    uploaded_files = st.file_uploader("Upload Receipts (JPG/PNG/PDF)", accept_multiple_files=True, type=['jpg', 'jpeg', 'png', 'pdf'])
-
-with tab2:
-    st.info("📸 Snap as many parts of the receipt as you need. They will compile below.")
-    if 'camera_snaps' not in st.session_state:
-        st.session_state.camera_snaps = []
-        
-    new_snap = st.camera_input("Snap a live photo")
+def normalize_bank_df(df):
+    cols = [c.strip() for c in df.columns]
+    df.columns = cols
     
-    if new_snap is not None:
-        if new_snap not in st.session_state.camera_snaps:
-            st.session_state.camera_snaps.append(new_snap)
-            
-    if st.session_state.camera_snaps:
-        st.success(f"{len(st.session_state.camera_snaps)} camera photo(s) queued!")
-        cols = st.columns(min(len(st.session_state.camera_snaps), 5))
-        for i, snap in enumerate(st.session_state.camera_snaps):
-            with cols[i % 5]:
-                st.image(snap, use_container_width=True)
-                
-        if st.button("🗑️ Clear Camera Batch"):
-            st.session_state.camera_snaps = []
-            st.rerun()
-
-all_image_files = []
-if uploaded_files:
-    all_image_files.extend(uploaded_files)
-if 'camera_snaps' in st.session_state and st.session_state.camera_snaps:
-    all_image_files.extend(st.session_state.camera_snaps)
-
-# --- PROCESS BUTTON ---
-st.write("---")
-if st.button("✨ Process Receipts", type="primary"):
-    if not all_image_files:
-        st.warning("Please upload or snap at least one image/PDF.")
+    if 'Payee' in df.columns:
+        bank = 'ASB'
+        payee_col = 'Payee'
+        amount_col = 'Amount'
+        date_col = 'Date'
+        desc_parts = ['Payee', 'Particulars', 'Code', 'Reference']
+    elif 'Details' in df.columns:
+        bank = 'ANZ'
+        payee_col = 'Details'
+        amount_col = 'Amount'
+        date_col = 'Date'
+        desc_parts = ['Details', 'Particulars', 'Code', 'Reference']
     else:
-        try:
-            api_key = st.secrets["GEMINI_API_KEY"]
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel('gemini-3.8-flash') 
-            
-            with st.spinner("Fetching category rules and analyzing files..."):
-                mapping_dict = fetch_dynamic_categories()
-                if not mapping_dict:
-                    mapping_dict = DEFAULT_CATEGORY_MAPPING
-                
-                final_prompt = build_system_prompt(mapping_dict)
-                
-                # 🚀 NEW LOGIC: Check for PDFs and slice them into images
-                images = []
-                for file in all_image_files:
-                    # Check if it has a filename ending in .pdf
-                    if hasattr(file, 'name') and file.name.lower().endswith('.pdf'):
-                        # Read the PDF into PyMuPDF
-                        doc = fitz.open(stream=file.read(), filetype="pdf")
-                        for page in doc:
-                            # Render each page as a high-quality image
-                            pix = page.get_pixmap(dpi=150)
-                            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                            images.append(resize_image(img))
-                    else:
-                        # Standard image processing
-                        images.append(resize_image(Image.open(file)))
-                
-                payload = [final_prompt] + images
-                
-                response = model.generate_content(payload)
-                
-                raw_text = response.text.replace("```json", "").replace("```", "").strip()
-                data = json.loads(raw_text)
-                
-                st.session_state['df'] = pd.DataFrame(data)
-                st.success("Extraction complete!")
-                
-        except KeyError as e:
-            st.error(f"Missing Secret: Please ensure {e} is added to your Streamlit App Secrets.")
-        except Exception as e:
-            st.error(f"An error occurred: {e}")
-
-# --- DISPLAY AND EDIT DATA ---
-if 'df' in st.session_state:
-    st.subheader("2. Review & Edit Data")
-    st.info("💡 Edit any rows with 'Low' confidence or 'Reconciled: No' directly in the table below.")
-    
-    def highlight_flags(row):
-        if row['Reconciled'] == 'No' or row['Confidence'] == 'Low':
-            return ['background-color: #ffcccc'] * len(row)
-        elif row['Confidence'] == 'Medium':
-            return ['background-color: #fff3cd'] * len(row)
-        return [''] * len(row)
-
-    styled_df = st.session_state['df'].style.apply(highlight_flags, axis=1)
-    
-    edited_df = st.data_editor(
-        styled_df, 
-        use_container_width=True, 
-        hide_index=True,
-        num_rows="dynamic"
-    )
-    
-    # --- EXPORT / SYNC OPTIONS ---
-    st.write("---")
-    col1, col2 = st.columns(2)
-    with col1:
-        csv = edited_df.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="⬇️ Download CSV",
-            data=csv,
-            file_name="reconciled_receipts.csv",
-            mime="text/csv",
-        )
-    with col2:
-        if st.button("☁️ Sync to Google Sheets"):
-            try:
-                with st.spinner("Connecting to Google Sheets..."):
-                    creds_dict = json.loads(st.secrets["GCP_JSON_STRING"])
-                    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-                    creds = Credentials.from_service_account_info(
-                        creds_dict, scopes=scopes
-                    )
-                    client = gspread.authorize(creds)
-                    
-                    sheet_id = st.secrets["SPREADSHEET_ID"]
-                    spreadsheet = client.open_by_key(sheet_id)
-                    worksheet = spreadsheet.worksheet("receipts") 
-                    
-                    df_upload = edited_df.fillna("")
-                    worksheet.append_rows(df_upload.values.tolist())
-                    
-                st.success("✅ Data securely synced to your Google Sheet!")
-                
-            except KeyError as e:
-                st.error(f"Missing Secret: Ensure {e} is added to Streamlit Secrets.")
-            except json.JSONDecodeError:
-                st.error("Failed to parse JSON. Please ensure you pasted the exact contents of the JSON file between the ''' quotes in Streamlit Secrets.")
-            except Exception as e:
-                st.error(f"Failed to sync: {e}")
+        bank = 'Unknown'
+        payee_col = df.columns[1] if len(df.columns) > 1 else df.columns[0]
+        amount_col =
