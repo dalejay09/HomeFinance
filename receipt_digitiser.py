@@ -397,7 +397,7 @@ with main_tab2:
     st.markdown("Upload raw CSV exports or PDF statements directly from your bank. The AI will normalize the format, deduplicate, and apply your custom categories.")
 
     st.subheader("1. Upload Bank File")
-    bank_file = st.file_uploader("Upload Bank Export (CSV or PDF)", type=['csv', 'pdf', 'png', 'jpg', 'jpeg'], key="bank_up")
+    bank_file = st.file_uploader("Upload Bank Export (CSV or PDF)", key="bank_up")
 
     if st.button("✨ Categorize Transactions", type="primary"):
         if not bank_file:
