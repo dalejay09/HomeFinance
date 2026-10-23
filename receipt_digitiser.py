@@ -42,15 +42,21 @@ Analyze the 'Item Name' and assign a highly granular 'Subcategory'. Then, map it
 **Discount Rule:** If a line item is a discount or promo reduction (e.g., a negative amount or labeled 'Discount'), you MUST assign it the exact same 'Category' and 'Subcategory' as the item it applies to.
 
 ### STRICT PROCESSING GUARDRAILS
-1. No Mathematical Inference: Never auto-fill, infer, or guess a missing price.
-2. Blanking: If a value is erased or illegible, output null (without quotes) for that JSON value. Do NOT use the word 'BLANK'.
-3. Date Formatting: All dates MUST be returned in the format DD/MM/YYYY.
-4. Invoice Fallback: If a clear 'Invoice Number' is not found, extract any identifying code on the receipt that can serve as a unique transaction ID.
-5. Confidence Scoring: 'High' (perfect), 'Medium' (probable), 'Low' (obscured). null values must always trigger 'Low'.
-6. Strict Reconciliation: If the calculated sum of items matches the Receipt Total exactly, mark Reconciled as 'Yes'. Otherwise, or if any value is null, mark 'No'.
+1. No Mathematical Inference for 'Amount': If a value is erased or illegible, output null (without quotes) for that JSON value. Do NOT use the word 'BLANK'.
+2. Date Formatting: All dates MUST be returned in the format DD/MM/YYYY.
+3. Invoice Fallback: If a clear 'Invoice Number' is not found, extract any identifying code on the receipt that can serve as a unique transaction ID.
+4. Confidence Scoring: 'High' (perfect), 'Medium' (probable), 'Low' (obscured). null values in 'Amount' must always trigger 'Low' confidence.
+5. Strict Reconciliation: If the calculated sum of 'Amount' matches the 'Receipt Total' exactly, mark 'Reconciled' as 'Yes'. Otherwise, or if any 'Amount' is null, mark 'No'.
 
-Output ONLY a raw JSON array of objects with keys:
-"Store Name", "Date", "Item Name", "Quantity", "Amount", "Invoice Number", "Receipt Total", "Reconciled", "Confidence", "Category", "Subcategory"
+### ESTIMATED PRICE LOGIC
+You must generate an 'Estimated Price' for EVERY line item using these strict priorities:
+1) If a legible price is visible, 'Estimated Price' equals the recorded 'Amount'.
+2) If a legible price is unavailable but a legible 'Receipt Total' IS available, estimate a reasonable price for the item such that the sum of all 'Estimated Prices' equals the 'Receipt Total'.
+3) If a legible price is unavailable and a 'Receipt Total' is also unavailable, estimate a reasonable market price for the item in New Zealand Dollars.
+*Note: Generating an 'Estimated Price' does not override Guardrail #1. The 'Amount' field must remain null if illegible.*
+
+Output ONLY a raw JSON array of objects with the exact following keys:
+"Store Name", "Date", "Item Name", "Quantity", "Amount", "Estimated Price", "Invoice Number", "Receipt Total", "Reconciled", "Confidence", "Category", "Subcategory"
 """
 
 def build_bank_csv_prompt(mapping_dictionary):
@@ -118,6 +124,7 @@ def fetch_dynamic_categories():
         if dynamic_mapping:
             return dynamic_mapping
     except Exception as e:
+        print(f"Could not load dynamic categories, falling back to default. {e}")
         pass
     return None
 
@@ -348,6 +355,17 @@ with main_tab1:
     if 'receipt_df' in st.session_state:
         st.subheader("2. Review & Edit Data")
         
+        # Check if reconciled, offer to use estimates if not
+        if not st.session_state['receipt_df'].empty and 'Reconciled' in st.session_state['receipt_df'].columns:
+            if any(st.session_state['receipt_df']['Reconciled'] == 'No'):
+                st.warning("⚠️ The receipt is not reconciled.")
+                if st.button("Use Estimated Prices"):
+                    if 'Estimated Price' in st.session_state['receipt_df'].columns:
+                        st.session_state['receipt_df']['Amount'] = st.session_state['receipt_df']['Estimated Price']
+                        st.session_state['receipt_df']['Reconciled'] = 'Yes'
+                        st.success("Amounts overwritten with estimated prices!")
+                        st.rerun()
+
         def highlight_flags(row):
             if row.get('Reconciled') == 'No' or row.get('Confidence') == 'Low':
                 return ['background-color: #ffcccc'] * len(row)
@@ -397,7 +415,7 @@ with main_tab2:
     st.markdown("Upload raw CSV exports or PDF statements directly from your bank. The AI will normalize the format, deduplicate, and apply your custom categories.")
 
     st.subheader("1. Upload Bank File")
-    bank_file = st.file_uploader("Upload Bank Export (CSV or PDF)", key="bank_up")
+    bank_file = st.file_uploader("Upload Bank Export", key="bank_up")
 
     if st.button("✨ Categorize Transactions", type="primary"):
         if not bank_file:
