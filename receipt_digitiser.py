@@ -48,15 +48,15 @@ Analyze the 'Item Name' and assign a highly granular 'Subcategory'. Then, map it
 4. Confidence Scoring: 'High' (perfect), 'Medium' (probable), 'Low' (obscured). null values in 'Amount' must always trigger 'Low' confidence.
 5. Strict Reconciliation: If the calculated sum of 'Amount' matches the 'Receipt Total' exactly, mark 'Reconciled' as 'Yes'. Otherwise, or if any 'Amount' is null, mark 'No'.
 
-### ESTIMATED PRICE LOGIC
-You must generate an 'Estimated Price' for EVERY line item using these strict priorities:
-1) If a legible price is visible, 'Estimated Price' equals the recorded 'Amount'.
-2) If a legible price is unavailable but a legible 'Receipt Total' IS available, estimate a reasonable price for the item such that the sum of all 'Estimated Prices' equals the 'Receipt Total'.
-3) If a legible price is unavailable and a 'Receipt Total' is also unavailable, estimate a reasonable market price for the item in New Zealand Dollars.
-*Note: Generating an 'Estimated Price' does not override Guardrail #1. The 'Amount' field must remain null if illegible.*
+### ESTIMATED AMOUNT LOGIC
+You must generate an 'Estimated Amount' for EVERY line item using these strict priorities:
+1) If a legible price is visible, 'Estimated Amount' equals the recorded 'Amount'.
+2) If a legible price is unavailable but a legible 'Receipt Total' IS available, estimate a reasonable line amount for the items such that the sum of all 'Estimated Amounts' equals the 'Receipt Total'.
+3) If a legible price is unavailable and a 'Receipt Total' is also unavailable, estimate a reasonable market amount for the line item in New Zealand Dollars.
+*Note: Generating an 'Estimated Amount' does not override Guardrail #1. The 'Amount' field must remain null if illegible.*
 
 Output ONLY a raw JSON array of objects with the exact following keys:
-"Store Name", "Date", "Item Name", "Quantity", "Amount", "Estimated Price", "Invoice Number", "Receipt Total", "Reconciled", "Confidence", "Category", "Subcategory"
+"Store Name", "Date", "Item Name", "Quantity", "Amount", "Invoice Number", "Receipt Total", "Reconciled", "Confidence", "Category", "Subcategory", "Estimated Amount"
 """
 
 def build_bank_csv_prompt(mapping_dictionary):
@@ -359,12 +359,19 @@ with main_tab1:
         if not st.session_state['receipt_df'].empty and 'Reconciled' in st.session_state['receipt_df'].columns:
             if any(st.session_state['receipt_df']['Reconciled'] == 'No'):
                 st.warning("⚠️ The receipt is not reconciled.")
-                if st.button("Use Estimated Prices"):
-                    if 'Estimated Price' in st.session_state['receipt_df'].columns:
-                        st.session_state['receipt_df']['Amount'] = st.session_state['receipt_df']['Estimated Price']
+                if st.button("Use Estimated Amounts"):
+                    if 'Estimated Amount' in st.session_state['receipt_df'].columns:
+                        st.session_state['receipt_df']['Amount'] = st.session_state['receipt_df']['Estimated Amount']
                         st.session_state['receipt_df']['Reconciled'] = 'Yes'
-                        st.success("Amounts overwritten with estimated prices!")
+                        st.success("Amounts overwritten with estimated amounts!")
                         st.rerun()
+
+        # Reorder columns to ensure 'Estimated Amount' is the very last column
+        df_cols = list(st.session_state['receipt_df'].columns)
+        if 'Estimated Amount' in df_cols:
+            df_cols.remove('Estimated Amount')
+            df_cols.append('Estimated Amount')
+            st.session_state['receipt_df'] = st.session_state['receipt_df'][df_cols]
 
         def highlight_flags(row):
             if row.get('Reconciled') == 'No' or row.get('Confidence') == 'Low':
