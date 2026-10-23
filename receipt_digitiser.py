@@ -13,85 +13,92 @@ import hashlib
 # 1. DEFAULT FALLBACK CATEGORY DICTIONARY
 # ==========================================
 DEFAULT_CATEGORY_MAPPING = {
-    "FruitVeg": ["cucumber", "apples", "grapes", "mandarins", "onions", "tomatoes (fresh)"],
-    "Dinners": ["tinned beans", "tinned tomatoes", "salsa", "noodles", "rice", "pasta", "frozen wedges", "stirfry sauce"],
-    "Lunches": ["crackers", "muesli bars", "cookies", "biscuits", "honey"],
-    "Snacks": ["chips", "popcorn", "fruit strips", "nuts"],
-    "Breakfasts": ["cereal", "oats", "cornflakes"],
-    "Dairy": ["milk", "sour cream", "butter", "margarine", "cheese block"],
-    "Bakery": ["toast bread", "rolls", "baguettes"],
-    "Meat": ["pork mince", "beef mince", "sausages", "chicken drumsticks", "ham (deli)"],
-    "Drinks": ["soda", "energy drinks", "juice"],
-    "Treats": ["chocolate", "ice cream", "lollies"],
-    "Personal Care": ["sanitary products", "nappies", "toilet paper", "wipes"],
-    "Household": ["resealable bags", "batteries", "cleaning spray", "checkout bag"]
+    "FoodAndDrinks": {
+        "Dinners": "mince beef pork sausages canned beans canned tomatoes udon noodles pasta cheese",
+        "Lunches": "crackers muesli bars cookies biscuits honey",
+        "Snacks": "chips popcorn fruit strips nuts",
+        "Breakfasts": "cereal oats cornflakes",
+    },
+    "Household": {
+        "Cleaning": "cleaning spray dish liquid washing powder",
+        "HouseholdOther": "batteries checkout bag resealable bags"
+    }
 }
+DEFAULT_CATCH_CODES = ["Category: FoodAndDrinks -> Code: FoodAndDrinksOther", "Category: Unknown -> Code: Unknown"]
 
 # ==========================================
 # 2. DYNAMIC PROMPT BUILDERS
 # ==========================================
-def build_receipt_system_prompt(mapping_dictionary):
+def build_receipt_system_prompt(mapping_dictionary, catch_codes):
     return f"""
 You are a strict, highly accurate receipt digitization assistant. 
 Your task is to extract line items from the provided receipt images and output them as a structured JSON list.
 
-### CATEGORIZATION INSTRUCTIONS
-Analyze the 'Item Name' and assign a highly granular 'Subcategory'. Then, map it to the most appropriate broad 'Category' based on this reference mapping:
+### CATEGORIZATION & CODING INSTRUCTIONS
+1. Analyze the 'Item Name'. 
+2. Determine a 'Generic Item' name (e.g., 'cucumbers', 'soda', 'shampoo') that generalizes the specific product.
+3. Assign the best 'Code' and its parent 'Category' based ONLY on this reference mapping:
 {json.dumps(mapping_dictionary, indent=2)}
 
-**Discount Rule:** If a line item is a discount or promo reduction (e.g., a negative amount or labeled 'Discount'), you MUST assign it the exact same 'Category' and 'Subcategory' as the item it applies to.
+**Catch Code Rule:** If you are less than 90% confident about an item's mapping, or the item does not clearly fit into the provided dictionary, you MUST default to one of these designated Catch Codes:
+{json.dumps(catch_codes, indent=2)}
+
+**Discount Rule:** If a line item is a discount or promo reduction (e.g., a negative amount or labeled 'Discount'), assign it the exact same 'Category', 'Code', and 'Generic Item' as the item it applies to.
 
 ### STRICT PROCESSING GUARDRAILS
-1. No Mathematical Inference for 'Amount': If a value is erased or illegible, output null (without quotes) for that JSON value. Do NOT use the word 'BLANK'.
+1. No Mathematical Inference for 'Amount': If a value is erased or illegible, output null (without quotes).
 2. Date Formatting: All dates MUST be returned in the format DD/MM/YYYY.
-3. Invoice Fallback: If a clear 'Invoice Number' is not found, extract any identifying code on the receipt that can serve as a unique transaction ID.
-4. Confidence Scoring: 'High' (perfect), 'Medium' (probable), 'Low' (obscured). null values in 'Amount' must always trigger 'Low' confidence.
-5. Strict Reconciliation: If the calculated sum of 'Amount' matches the 'Receipt Total' exactly, mark 'Reconciled' as 'Yes'. Otherwise, or if any 'Amount' is null, mark 'No'.
+3. Invoice Fallback: Extract any identifying code on the receipt that can serve as a unique transaction ID.
+4. Confidence Scoring: 'High' (perfect), 'Medium' (probable), 'Low' (obscured). null values in 'Amount' must always trigger 'Low'.
+5. Strict Reconciliation: If the calculated sum of 'Amount' matches 'Receipt Total' exactly, mark 'Reconciled' as 'Yes'. Otherwise, mark 'No'.
 
 ### ESTIMATED AMOUNT LOGIC
 You must generate an 'Estimated Amount' for EVERY line item using these strict priorities:
-1) If a legible price is visible, 'Estimated Amount' equals the recorded 'Amount'.
-2) If a legible price is unavailable but a legible 'Receipt Total' IS available, estimate a reasonable line amount for the items such that the sum of all 'Estimated Amounts' equals the 'Receipt Total'.
-3) If a legible price is unavailable and a 'Receipt Total' is also unavailable, estimate a reasonable market amount for the line item in New Zealand Dollars.
+1) Legible price visible = 'Amount'
+2) Legible price unavailable but 'Receipt Total' available = estimate reasonable line amounts so the sum equals 'Receipt Total'.
+3) No price, no total = estimate reasonable market amount in NZD.
 *Note: Generating an 'Estimated Amount' does not override Guardrail #1. The 'Amount' field must remain null if illegible.*
 
 Output ONLY a raw JSON array of objects with the exact following keys:
-"Store Name", "Date", "Item Name", "Quantity", "Amount", "Invoice Number", "Receipt Total", "Reconciled", "Confidence", "Category", "Subcategory", "Estimated Amount"
+"Store Name", "Date", "Item Name", "Generic Item", "Quantity", "Amount", "Invoice Number", "Receipt Total", "Reconciled", "Confidence", "Category", "Code", "Estimated Amount"
 """
 
-def build_bank_csv_prompt(mapping_dictionary):
+def build_bank_csv_prompt(mapping_dictionary, catch_codes):
     return f"""
 You are an expert financial categorization assistant.
 I will provide you with a JSON array of raw bank transactions.
-Your task is to assign a highly granular 'Subcategory' and map it to an exact 'Category' based on this reference mapping:
+Your task is to assign an exact 'Code' and map it to its 'Category' based ONLY on this reference mapping:
 {json.dumps(mapping_dictionary, indent=2)}
 
+**Catch Code Rule:** If you are less than 90% confident about a transaction's mapping, you MUST default to one of these Catch Codes:
+{json.dumps(catch_codes, indent=2)}
+
 Rules:
-1. Output ONLY a raw JSON array of objects with the exact following keys: "Date", "Unique ID", "Account", "Bank", "Payee / Description", "Amount", "Category", "Subcategory"
-2. Retain the exact original values for Date, Unique ID, Account, Bank, Payee / Description, and Amount from the provided JSON.
-3. If the transaction is income (positive amount like salary or deposit), assign 'Income' unless mapping dictates otherwise.
-4. If it doesn't fit perfectly into the mapping, make your best logical guess based on the description.
+1. Output ONLY a raw JSON array of objects with the exact keys: "Date", "Unique ID", "Account", "Bank", "Payee / Description", "Amount", "Category", "Code"
+2. Retain the exact original values for Date, Unique ID, Account, Bank, Payee / Description, and Amount.
+3. If the transaction is income (positive amount), assign 'Income' unless mapping dictates otherwise.
 """
 
-def build_bank_pdf_prompt(mapping_dictionary):
+def build_bank_pdf_prompt(mapping_dictionary, catch_codes):
     return f"""
 You are an expert financial categorization assistant.
 I will provide you with images of bank statements.
-Your task is to extract all line-item transactions from these statements and categorize them.
+Your task is to extract all line-item transactions and categorize them.
 
 ### CATEGORIZATION INSTRUCTIONS
-Assign a highly granular 'Subcategory' and map it to an exact 'Category' based on this reference mapping:
+Assign an exact 'Code' and map it to its 'Category' based ONLY on this reference mapping:
 {json.dumps(mapping_dictionary, indent=2)}
 
+**Catch Code Rule:** If you are less than 90% confident about a transaction's mapping, you MUST default to one of these Catch Codes:
+{json.dumps(catch_codes, indent=2)}
+
 Rules:
-1. Output ONLY a raw JSON array of objects with the exact following keys: "Date", "Account", "Bank", "Payee / Description", "Amount", "Category", "Subcategory"
+1. Output ONLY a raw JSON array of objects with the exact keys: "Date", "Account", "Bank", "Payee / Description", "Amount", "Category", "Code"
 2. 'Date': Use the format DD/MM/YYYY.
-3. 'Account': Extract the full account number shown on the statement.
-4. 'Bank': Deduce the bank name (e.g., ASB, ANZ).
-5. 'Amount': Extract as a number (use negative numbers for withdrawals/debits/purchases, positive for deposits/credits/payments).
+3. 'Account': Extract the full account number.
+4. 'Bank': Deduce the bank name.
+5. 'Amount': Extract as a number (negative for debits, positive for credits).
 6. Combine the Payee, Particulars, Code, and Reference into the single 'Payee / Description' field.
-7. If the transaction is income (positive amount like salary or deposit), assign 'Income' unless mapping dictates otherwise.
-8. If it doesn't fit perfectly into the mapping, make your best logical guess based on the description.
 """
 
 # ==========================================
@@ -101,6 +108,7 @@ def resize_image(image, max_size=(1024, 1024)):
     image.thumbnail(max_size, Image.Resampling.LANCZOS)
     return image
 
+@st.cache_data(ttl=300)
 def fetch_dynamic_categories():
     try:
         creds_dict = json.loads(st.secrets["GCP_JSON_STRING"])
@@ -115,18 +123,31 @@ def fetch_dynamic_categories():
         records = worksheet.get_all_records()
         
         dynamic_mapping = {}
+        catch_codes = []
+        
         for row in records:
             cat = str(row.get("Category", "")).strip()
-            examples = str(row.get("Subcategory Examples", "")).strip()
-            if cat: 
-                dynamic_mapping[cat] = examples
+            code = str(row.get("Code", "")).strip()
+            examples = str(row.get("Description Examples", "")).strip()
+            autocode = str(row.get("AutoCode", "Yes")).strip().lower()
+            catchcode = str(row.get("CatchCode", "No")).strip().lower()
+            
+            # 1. Populate the main dictionary, EXCLUDING items where AutoCode is 'No'
+            if autocode == 'yes' and cat and code:
+                if cat not in dynamic_mapping:
+                    dynamic_mapping[cat] = {}
+                dynamic_mapping[cat][code] = examples
+                
+            # 2. Compile the Catch Codes list for the AI fallback instructions
+            if catchcode == 'yes' and cat and code:
+                catch_codes.append(f"Category: {cat} -> Code: {code}")
                 
         if dynamic_mapping:
-            return dynamic_mapping
+            return dynamic_mapping, catch_codes
     except Exception as e:
         print(f"Could not load dynamic categories, falling back to default. {e}")
         pass
-    return None
+    return None, None
 
 def read_messy_bank_csv(uploaded_file):
     lines = uploaded_file.getvalue().decode('utf-8').splitlines()
@@ -209,7 +230,6 @@ def normalize_bank_df(df, account_id="Unknown"):
     norm_df['Payee / Description'] = df.apply(make_desc, axis=1)
     norm_df['Amount'] = pd.to_numeric(df[amount_col].astype(str).str.replace(r'[$,]', '', regex=True), errors='coerce')
     
-    # Generate Unique IDs
     ids = []
     seen_hashes = {}
     
@@ -233,7 +253,7 @@ def normalize_bank_df(df, account_id="Unknown"):
 
     norm_df.insert(1, 'Unique ID', ids)
     norm_df['Category'] = ""
-    norm_df['Subcategory'] = ""
+    norm_df['Code'] = ""
     return norm_df
 
 def apply_missing_ids(df):
@@ -271,9 +291,8 @@ main_tab1, main_tab2 = st.tabs(["🧾 Receipt Digitizer", "🏦 Bank Statements"
 # ---------------------------------------------------------
 with main_tab1:
     st.title("🧾 AI Receipt Digitizer")
-    st.markdown("Upload close-up photos, PDFs, or snap live pictures using the camera. The AI will stitch them logically if they belong to the same transaction.")
+    st.markdown("Upload close-up photos, PDFs, or snap live pictures using the camera.")
 
-    # --- IMAGE INPUT TABS ---
     st.subheader("1. Add Receipts")
     r_tab1, r_tab2 = st.tabs(["📁 Upload Files", "📸 Take Photo"])
 
@@ -308,7 +327,6 @@ with main_tab1:
     if 'camera_snaps' in st.session_state and st.session_state.camera_snaps:
         all_image_files.extend(st.session_state.camera_snaps)
 
-    # --- PROCESS BUTTON ---
     st.write("---")
     if st.button("✨ Process Receipts", type="primary"):
         if not all_image_files:
@@ -320,11 +338,12 @@ with main_tab1:
                 model = genai.GenerativeModel('gemini-3.8-flash') 
                 
                 with st.spinner("Fetching category rules and analyzing files..."):
-                    mapping_dict = fetch_dynamic_categories()
+                    mapping_dict, catch_codes = fetch_dynamic_categories()
                     if not mapping_dict:
                         mapping_dict = DEFAULT_CATEGORY_MAPPING
+                        catch_codes = DEFAULT_CATCH_CODES
                     
-                    final_prompt = build_receipt_system_prompt(mapping_dict)
+                    final_prompt = build_receipt_system_prompt(mapping_dict, catch_codes)
                     
                     images = []
                     for file in all_image_files:
@@ -351,11 +370,9 @@ with main_tab1:
             except Exception as e:
                 st.error(f"An error occurred: {e}")
 
-    # --- DISPLAY AND EDIT DATA ---
     if 'receipt_df' in st.session_state:
         st.subheader("2. Review & Edit Data")
         
-        # Check if reconciled, offer to use estimates if not
         if not st.session_state['receipt_df'].empty and 'Reconciled' in st.session_state['receipt_df'].columns:
             if any(st.session_state['receipt_df']['Reconciled'] == 'No'):
                 st.warning("⚠️ The receipt is not reconciled.")
@@ -366,7 +383,6 @@ with main_tab1:
                         st.success("Amounts overwritten with estimated amounts!")
                         st.rerun()
 
-        # Reorder columns to ensure 'Estimated Amount' is the very last column
         df_cols = list(st.session_state['receipt_df'].columns)
         if 'Estimated Amount' in df_cols:
             df_cols.remove('Estimated Amount')
@@ -439,23 +455,22 @@ with main_tab2:
                 model = genai.GenerativeModel('gemini-3.8-flash') 
                 
                 with st.spinner("Analyzing bank file and applying category rules..."):
-                    mapping_dict = fetch_dynamic_categories()
+                    mapping_dict, catch_codes = fetch_dynamic_categories()
                     if not mapping_dict:
                         mapping_dict = DEFAULT_CATEGORY_MAPPING
+                        catch_codes = DEFAULT_CATCH_CODES
 
                     is_csv = hasattr(bank_file, 'name') and bank_file.name.lower().endswith('.csv')
                     
                     if is_csv:
-                        # Process CSV
                         raw_df, extracted_account = read_messy_bank_csv(bank_file)
                         normalized_df = normalize_bank_df(raw_df, extracted_account)
                         bank_json_payload = normalized_df.to_json(orient="records")
                         
-                        final_prompt = build_bank_csv_prompt(mapping_dict)
+                        final_prompt = build_bank_csv_prompt(mapping_dict, catch_codes)
                         payload = [final_prompt, "Here are the transactions to categorize:", bank_json_payload]
                     else:
-                        # Process PDF / Images
-                        final_prompt = build_bank_pdf_prompt(mapping_dict)
+                        final_prompt = build_bank_pdf_prompt(mapping_dict, catch_codes)
                         images = []
                         if hasattr(bank_file, 'name') and bank_file.name.lower().endswith('.pdf'):
                             doc = fitz.open(stream=bank_file.read(), filetype="pdf")
@@ -472,11 +487,9 @@ with main_tab2:
                     raw_text = response.text.replace("```json", "").replace("```", "").strip()
                     categorized_data = json.loads(raw_text)
                     
-                    # Apply missing IDs (specifically needed for PDF extractions)
                     result_df = apply_missing_ids(pd.DataFrame(categorized_data))
                     
-                    # Enforce strict column order and fill missing
-                    col_order = ["Date", "Unique ID", "Account", "Bank", "Payee / Description", "Amount", "Category", "Subcategory"]
+                    col_order = ["Date", "Unique ID", "Account", "Bank", "Payee / Description", "Amount", "Category", "Code"]
                     for col in col_order:
                         if col not in result_df.columns:
                             result_df[col] = ""
@@ -490,7 +503,6 @@ with main_tab2:
             except Exception as e:
                 st.error(f"An error occurred: {e}. Please check the file and try again.")
 
-    # --- DISPLAY AND EDIT DATA ---
     if 'bank_df' in st.session_state:
         st.subheader("2. Review & Edit Transactions")
         
@@ -522,7 +534,6 @@ with main_tab2:
                         sheet_id = st.secrets["SPREADSHEET_ID"]
                         spreadsheet = client.open_by_key(sheet_id)
                         
-                        # Fetch optional routing map
                         routing_map = {}
                         try:
                             routing_sheet = spreadsheet.worksheet("routing")
@@ -547,10 +558,9 @@ with main_tab2:
                                 worksheet = spreadsheet.add_worksheet(title=tab_name, rows="1000", cols="20")
                                 worksheet.append_row(list(df_upload.columns))
                             
-                            existing_ids = worksheet.col_values(2) # Column B is Unique ID
+                            existing_ids = worksheet.col_values(2)
                             
                             acc_df = df_upload[df_upload['Account'] == acc]
-                            # Drop exact ID matches to prevent duplication
                             new_rows = acc_df[~acc_df['Unique ID'].astype(str).isin(existing_ids)]
                             
                             skipped_count += (len(acc_df) - len(new_rows))
