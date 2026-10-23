@@ -387,7 +387,12 @@ with main_tab1:
             use_container_width=True, 
             hide_index=True,
             num_rows="dynamic",
-            key="receipt_editor"
+            key="receipt_editor",
+            column_config={
+                "Amount": st.column_config.NumberColumn("Amount", format="%.2f"),
+                "Estimated Amount": st.column_config.NumberColumn("Estimated Amount", format="%.2f"),
+                "Receipt Total": st.column_config.NumberColumn("Receipt Total", format="%.2f")
+            }
         )
         
         st.write("---")
@@ -494,7 +499,10 @@ with main_tab2:
             use_container_width=True, 
             hide_index=True,
             num_rows="dynamic",
-            key="bank_editor"
+            key="bank_editor",
+            column_config={
+                "Amount": st.column_config.NumberColumn("Amount", format="%.2f")
+            }
         )
         
         st.write("---")
