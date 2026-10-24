@@ -25,6 +25,16 @@ DEFAULT_CATEGORY_MAPPING = {
     }
 }
 DEFAULT_CATCH_CODES = ["Category: FoodAndDrinks -> Code: FoodAndDrinksOther", "Category: Unknown -> Code: Unknown"]
+DEFAULT_ALL_CODES_MAP = {
+    "Dinners": "FoodAndDrinks",
+    "Lunches": "FoodAndDrinks",
+    "Snacks": "FoodAndDrinks",
+    "Breakfasts": "FoodAndDrinks",
+    "FoodAndDrinksOther": "FoodAndDrinks",
+    "Cleaning": "Household",
+    "HouseholdOther": "Household",
+    "Unknown": "Unknown"
+}
 
 # ==========================================
 # 2. DYNAMIC PROMPT BUILDERS
@@ -122,8 +132,9 @@ def fetch_dynamic_categories():
         
         records = worksheet.get_all_records()
         
-        dynamic_mapping = {}
+        ai_mapping = {}
         catch_codes = []
+        all_codes_map = {}
         
         for row in records:
             cat = str(row.get("Category", "")).strip()
@@ -132,22 +143,26 @@ def fetch_dynamic_categories():
             autocode = str(row.get("AutoCode", "Yes")).strip().lower()
             catchcode = str(row.get("CatchCode", "No")).strip().lower()
             
-            # 1. Populate the main dictionary, EXCLUDING items where AutoCode is 'No'
-            if autocode == 'yes' and cat and code:
-                if cat not in dynamic_mapping:
-                    dynamic_mapping[cat] = {}
-                dynamic_mapping[cat][code] = examples
+            if cat and code:
+                # Store every single code for UI validation
+                all_codes_map[code] = cat
                 
-            # 2. Compile the Catch Codes list for the AI fallback instructions
-            if catchcode == 'yes' and cat and code:
-                catch_codes.append(f"Category: {cat} -> Code: {code}")
-                
-        if dynamic_mapping:
-            return dynamic_mapping, catch_codes
+                # Exclude AutoCode = No from the AI dictionary
+                if autocode == 'yes':
+                    if cat not in ai_mapping:
+                        ai_mapping[cat] = {}
+                    ai_mapping[cat][code] = examples
+                    
+                # Compile fallback instructions
+                if catchcode == 'yes':
+                    catch_codes.append(f"Category: {cat} -> Code: {code}")
+                    
+        if all_codes_map:
+            return ai_mapping, catch_codes, all_codes_map
     except Exception as e:
         print(f"Could not load dynamic categories, falling back to default. {e}")
         pass
-    return None, None
+    return None, None, None
 
 def read_messy_bank_csv(uploaded_file):
     lines = uploaded_file.getvalue().decode('utf-8').splitlines()
@@ -284,6 +299,12 @@ def apply_missing_ids(df):
 # ==========================================
 st.set_page_config(page_title="Finance Digitizer", layout="wide")
 
+# Fetch codes globally so we can configure the tables
+_, _, ALL_CODES_MAP = fetch_dynamic_categories()
+if not ALL_CODES_MAP:
+    ALL_CODES_MAP = DEFAULT_ALL_CODES_MAP
+VALID_CODES = list(ALL_CODES_MAP.keys())
+
 main_tab1, main_tab2 = st.tabs(["🧾 Receipt Digitizer", "🏦 Bank Statements"])
 
 # ---------------------------------------------------------
@@ -338,12 +359,12 @@ with main_tab1:
                 model = genai.GenerativeModel('gemini-3.8-flash') 
                 
                 with st.spinner("Fetching category rules and analyzing files..."):
-                    mapping_dict, catch_codes = fetch_dynamic_categories()
-                    if not mapping_dict:
-                        mapping_dict = DEFAULT_CATEGORY_MAPPING
+                    ai_mapping, catch_codes, _ = fetch_dynamic_categories()
+                    if not ai_mapping:
+                        ai_mapping = DEFAULT_CATEGORY_MAPPING
                         catch_codes = DEFAULT_CATCH_CODES
                     
-                    final_prompt = build_receipt_system_prompt(mapping_dict, catch_codes)
+                    final_prompt = build_receipt_system_prompt(ai_mapping, catch_codes)
                     
                     images = []
                     for file in all_image_files:
@@ -398,6 +419,7 @@ with main_tab1:
 
         styled_receipt_df = st.session_state['receipt_df'].style.apply(highlight_flags, axis=1)
         
+        # Interactive Editor with Selectbox and mapping logic
         edited_receipt_df = st.data_editor(
             styled_receipt_df, 
             use_container_width=True, 
@@ -405,12 +427,20 @@ with main_tab1:
             num_rows="dynamic",
             key="receipt_editor",
             column_config={
+                "Code": st.column_config.SelectboxColumn("Code", options=VALID_CODES, required=True),
+                "Category": st.column_config.TextColumn("Category", disabled=True),
                 "Amount": st.column_config.NumberColumn("Amount", format="%.2f"),
                 "Estimated Amount": st.column_config.NumberColumn("Estimated Amount", format="%.2f"),
                 "Receipt Total": st.column_config.NumberColumn("Receipt Total", format="%.2f")
             }
         )
         
+        # Instant Auto-Map Loop: If the user changes a code, instantly update the category and rerun
+        if not edited_receipt_df.equals(st.session_state['receipt_df']):
+            edited_receipt_df['Category'] = edited_receipt_df['Code'].map(ALL_CODES_MAP).fillna(edited_receipt_df['Category'])
+            st.session_state['receipt_df'] = edited_receipt_df
+            st.rerun()
+            
         st.write("---")
         col1, col2 = st.columns(2)
         with col1:
@@ -455,9 +485,9 @@ with main_tab2:
                 model = genai.GenerativeModel('gemini-3.8-flash') 
                 
                 with st.spinner("Analyzing bank file and applying category rules..."):
-                    mapping_dict, catch_codes = fetch_dynamic_categories()
-                    if not mapping_dict:
-                        mapping_dict = DEFAULT_CATEGORY_MAPPING
+                    ai_mapping, catch_codes, _ = fetch_dynamic_categories()
+                    if not ai_mapping:
+                        ai_mapping = DEFAULT_CATEGORY_MAPPING
                         catch_codes = DEFAULT_CATCH_CODES
 
                     is_csv = hasattr(bank_file, 'name') and bank_file.name.lower().endswith('.csv')
@@ -467,10 +497,10 @@ with main_tab2:
                         normalized_df = normalize_bank_df(raw_df, extracted_account)
                         bank_json_payload = normalized_df.to_json(orient="records")
                         
-                        final_prompt = build_bank_csv_prompt(mapping_dict, catch_codes)
+                        final_prompt = build_bank_csv_prompt(ai_mapping, catch_codes)
                         payload = [final_prompt, "Here are the transactions to categorize:", bank_json_payload]
                     else:
-                        final_prompt = build_bank_pdf_prompt(mapping_dict, catch_codes)
+                        final_prompt = build_bank_pdf_prompt(ai_mapping, catch_codes)
                         images = []
                         if hasattr(bank_file, 'name') and bank_file.name.lower().endswith('.pdf'):
                             doc = fitz.open(stream=bank_file.read(), filetype="pdf")
@@ -513,9 +543,17 @@ with main_tab2:
             num_rows="dynamic",
             key="bank_editor",
             column_config={
+                "Code": st.column_config.SelectboxColumn("Code", options=VALID_CODES, required=True),
+                "Category": st.column_config.TextColumn("Category", disabled=True),
                 "Amount": st.column_config.NumberColumn("Amount", format="%.2f")
             }
         )
+        
+        # Instant Auto-Map Loop for Bank Statement Tab
+        if not edited_bank_df.equals(st.session_state['bank_df']):
+            edited_bank_df['Category'] = edited_bank_df['Code'].map(ALL_CODES_MAP).fillna(edited_bank_df['Category'])
+            st.session_state['bank_df'] = edited_bank_df
+            st.rerun()
         
         st.write("---")
         col1, col2 = st.columns(2)
