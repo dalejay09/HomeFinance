@@ -42,7 +42,7 @@ DEFAULT_ALL_CODES_MAP = {
 def build_receipt_system_prompt(mapping_dictionary, catch_codes):
     return f"""
 You are a strict, highly accurate receipt digitization assistant. 
-Your task is to extract line items from the provided receipt images and output them as a structured JSON list.
+Your task is to extract line items from the provided receipt images or text files and output them as a structured JSON list.
 
 ### CATEGORIZATION & CODING INSTRUCTIONS
 1. Analyze the 'Item Name'. 
@@ -312,13 +312,13 @@ main_tab1, main_tab2 = st.tabs(["🧾 Receipt Digitizer", "🏦 Bank Statements"
 # ---------------------------------------------------------
 with main_tab1:
     st.title("🧾 AI Receipt Digitizer")
-    st.markdown("Upload close-up photos, PDFs, or snap live pictures using the camera.")
+    st.markdown("Upload close-up photos, PDFs, text, or spreadsheet files, or snap live pictures using the camera.")
 
     st.subheader("1. Add Receipts")
     r_tab1, r_tab2 = st.tabs(["📁 Upload Files", "📸 Take Photo"])
 
     with r_tab1:
-        uploaded_files = st.file_uploader("Upload Receipts (JPG/PNG/PDF)", accept_multiple_files=True, type=['jpg', 'jpeg', 'png', 'pdf'], key="receipt_up")
+        uploaded_files = st.file_uploader("Upload Receipts (JPG/PNG/PDF/TXT/CSV/XLSX)", accept_multiple_files=True, type=['jpg', 'jpeg', 'png', 'pdf', 'txt', 'csv', 'xlsx'], key="receipt_up")
 
     with r_tab2:
         st.info("📸 Snap as many parts of the receipt as you need. They will compile below.")
@@ -342,16 +342,16 @@ with main_tab1:
                 st.session_state.camera_snaps = []
                 st.rerun()
 
-    all_image_files = []
+    all_files = []
     if uploaded_files:
-        all_image_files.extend(uploaded_files)
+        all_files.extend(uploaded_files)
     if 'camera_snaps' in st.session_state and st.session_state.camera_snaps:
-        all_image_files.extend(st.session_state.camera_snaps)
+        all_files.extend(st.session_state.camera_snaps)
 
     st.write("---")
     if st.button("✨ Process Receipts", type="primary"):
-        if not all_image_files:
-            st.warning("Please upload or snap at least one image/PDF.")
+        if not all_files:
+            st.warning("Please upload or snap at least one file.")
         else:
             try:
                 api_key = st.secrets["GEMINI_API_KEY"]
@@ -365,19 +365,47 @@ with main_tab1:
                         catch_codes = DEFAULT_CATCH_CODES
                     
                     final_prompt = build_receipt_system_prompt(ai_mapping, catch_codes)
+                    payload = [final_prompt]
                     
-                    images = []
-                    for file in all_image_files:
-                        if hasattr(file, 'name') and file.name.lower().endswith('.pdf'):
-                            doc = fitz.open(stream=file.read(), filetype="pdf")
-                            for page in doc:
-                                pix = page.get_pixmap(dpi=150)
-                                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                                images.append(resize_image(img))
+                    for file in all_files:
+                        if hasattr(file, 'name') and file.name:
+                            file_ext = file.name.lower().split('.')[-1]
+                            
+                            # Handle PDF
+                            if file_ext == 'pdf':
+                                doc = fitz.open(stream=file.read(), filetype="pdf")
+                                for page in doc:
+                                    pix = page.get_pixmap(dpi=150)
+                                    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                                    payload.append(resize_image(img))
+                                    
+                            # Handle Tabular Data (CSV, XLSX)
+                            elif file_ext in ['csv', 'xlsx']:
+                                try:
+                                    if file_ext == 'csv':
+                                        df_upload = pd.read_csv(file)
+                                    else:
+                                        df_upload = pd.read_excel(file)
+                                    payload.append(f"Receipt data from '{file.name}':
+" + df_upload.to_csv(index=False))
+                                except Exception as e:
+                                    st.warning(f"Could not read {file.name} as a spreadsheet. Error: {e}")
+                                    
+                            # Handle Text (TXT)
+                            elif file_ext == 'txt':
+                                try:
+                                    payload.append(f"Receipt text from '{file.name}':
+" + file.getvalue().decode('utf-8'))
+                                except Exception as e:
+                                    st.warning(f"Could not read {file.name}. Error: {e}")
+                                    
+                            # Handle Images
+                            else:
+                                payload.append(resize_image(Image.open(file)))
                         else:
-                            images.append(resize_image(Image.open(file)))
+                            # Handle unnamed snaps
+                            payload.append(resize_image(Image.open(file)))
                     
-                    payload = [final_prompt] + images
                     response = model.generate_content(payload)
                     
                     raw_text = response.text.replace("```json", "").replace("```", "").strip()
