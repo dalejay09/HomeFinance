@@ -386,16 +386,15 @@ with main_tab1:
                                         df_upload = pd.read_csv(file)
                                     else:
                                         df_upload = pd.read_excel(file)
-                                    payload.append(f"Receipt data from '{file.name}':
-" + df_upload.to_csv(index=False))
+                                    # Fix: Added explicit '\n' instead of actual newline in the f-string
+                                    payload.append(f"Receipt data from '{file.name}':\n" + df_upload.to_csv(index=False))
                                 except Exception as e:
                                     st.warning(f"Could not read {file.name} as a spreadsheet. Error: {e}")
                                     
                             # Handle Text (TXT)
                             elif file_ext == 'txt':
                                 try:
-                                    payload.append(f"Receipt text from '{file.name}':
-" + file.getvalue().decode('utf-8'))
+                                    payload.append(f"Receipt text from '{file.name}':\n" + file.getvalue().decode('utf-8'))
                                 except Exception as e:
                                     st.warning(f"Could not read {file.name}. Error: {e}")
                                     
