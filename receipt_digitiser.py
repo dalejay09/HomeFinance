@@ -144,16 +144,11 @@ def fetch_dynamic_categories():
             catchcode = str(row.get("CatchCode", "No")).strip().lower()
             
             if cat and code:
-                # Store every single code for UI validation
                 all_codes_map[code] = cat
-                
-                # Exclude AutoCode = No from the AI dictionary
                 if autocode == 'yes':
                     if cat not in ai_mapping:
                         ai_mapping[cat] = {}
                     ai_mapping[cat][code] = examples
-                    
-                # Compile fallback instructions
                 if catchcode == 'yes':
                     catch_codes.append(f"Category: {cat} -> Code: {code}")
                     
@@ -299,7 +294,6 @@ def apply_missing_ids(df):
 # ==========================================
 st.set_page_config(page_title="Finance Digitizer", layout="wide")
 
-# Fetch codes globally so we can configure the tables
 _, _, ALL_CODES_MAP = fetch_dynamic_categories()
 if not ALL_CODES_MAP:
     ALL_CODES_MAP = DEFAULT_ALL_CODES_MAP
@@ -370,49 +364,36 @@ with main_tab1:
                     for file in all_files:
                         if hasattr(file, 'name') and file.name:
                             file_ext = file.name.lower().split('.')[-1]
-                            
-                            # Handle PDF
                             if file_ext == 'pdf':
                                 doc = fitz.open(stream=file.read(), filetype="pdf")
                                 for page in doc:
                                     pix = page.get_pixmap(dpi=150)
                                     img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
                                     payload.append(resize_image(img))
-                                    
-                            # Handle Tabular Data (CSV, XLSX)
                             elif file_ext in ['csv', 'xlsx']:
                                 try:
                                     if file_ext == 'csv':
                                         df_upload = pd.read_csv(file)
                                     else:
                                         df_upload = pd.read_excel(file)
-                                    # Fix: Added explicit '\n' instead of actual newline in the f-string
                                     payload.append(f"Receipt data from '{file.name}':\n" + df_upload.to_csv(index=False))
                                 except Exception as e:
                                     st.warning(f"Could not read {file.name} as a spreadsheet. Error: {e}")
-                                    
-                            # Handle Text (TXT)
                             elif file_ext == 'txt':
                                 try:
                                     payload.append(f"Receipt text from '{file.name}':\n" + file.getvalue().decode('utf-8'))
                                 except Exception as e:
                                     st.warning(f"Could not read {file.name}. Error: {e}")
-                                    
-                            # Handle Images
                             else:
                                 payload.append(resize_image(Image.open(file)))
                         else:
-                            # Handle unnamed snaps
                             payload.append(resize_image(Image.open(file)))
                     
                     response = model.generate_content(payload)
-                    
                     raw_text = response.text.replace("```json", "").replace("```", "").strip()
                     data = json.loads(raw_text)
-                    
                     st.session_state['receipt_df'] = pd.DataFrame(data)
                     st.success("Extraction complete!")
-                    
             except KeyError as e:
                 st.error(f"Missing Secret: Please ensure {e} is added to your Streamlit App Secrets.")
             except Exception as e:
@@ -420,7 +401,6 @@ with main_tab1:
 
     if 'receipt_df' in st.session_state:
         st.subheader("2. Review & Edit Data")
-        
         if not st.session_state['receipt_df'].empty and 'Reconciled' in st.session_state['receipt_df'].columns:
             if any(st.session_state['receipt_df']['Reconciled'] == 'No'):
                 st.warning("⚠️ The receipt is not reconciled.")
@@ -446,7 +426,6 @@ with main_tab1:
 
         styled_receipt_df = st.session_state['receipt_df'].style.apply(highlight_flags, axis=1)
         
-        # Interactive Editor with Selectbox and mapping logic
         edited_receipt_df = st.data_editor(
             styled_receipt_df, 
             use_container_width=True, 
@@ -462,7 +441,6 @@ with main_tab1:
             }
         )
         
-        # Instant Auto-Map Loop: If the user changes a code, instantly update the category and rerun
         if not edited_receipt_df.equals(st.session_state['receipt_df']):
             edited_receipt_df['Category'] = edited_receipt_df['Code'].map(ALL_CODES_MAP).fillna(edited_receipt_df['Category'])
             st.session_state['receipt_df'] = edited_receipt_df
@@ -563,29 +541,43 @@ with main_tab2:
     if 'bank_df' in st.session_state:
         st.subheader("2. Review & Edit Transactions")
         
+        # Display the DataFrame but exclude the redundant Category column visually
+        display_df = st.session_state['bank_df'].copy()
+        if 'Category' in display_df.columns:
+            display_df = display_df.drop(columns=['Category'])
+
         edited_bank_df = st.data_editor(
-            st.session_state['bank_df'], 
+            display_df, 
             use_container_width=True, 
             hide_index=True,
             num_rows="dynamic",
             key="bank_editor",
             column_config={
                 "Code": st.column_config.SelectboxColumn("Code", options=VALID_CODES, required=True),
-                "Category": st.column_config.TextColumn("Category", disabled=True),
                 "Amount": st.column_config.NumberColumn("Amount", format="%.2f")
             }
         )
         
-        # Instant Auto-Map Loop for Bank Statement Tab
-        if not edited_bank_df.equals(st.session_state['bank_df']):
-            edited_bank_df['Category'] = edited_bank_df['Code'].map(ALL_CODES_MAP).fillna(edited_bank_df['Category'])
-            st.session_state['bank_df'] = edited_bank_df
+        # We need to map the edited values back to the hidden 'Category' logic in state
+        updated_state_df = edited_bank_df.copy()
+        updated_state_df['Category'] = updated_state_df['Code'].map(ALL_CODES_MAP).fillna("")
+        
+        # Ensure column order
+        cols = list(updated_state_df.columns)
+        if 'Category' in cols and 'Code' in cols:
+            cols.remove('Category')
+            code_index = cols.index('Code')
+            cols.insert(code_index, 'Category')
+            updated_state_df = updated_state_df[cols]
+
+        if not updated_state_df.equals(st.session_state['bank_df']):
+            st.session_state['bank_df'] = updated_state_df
             st.rerun()
         
         st.write("---")
         col1, col2 = st.columns(2)
         with col1:
-            csv = edited_bank_df.to_csv(index=False).encode('utf-8')
+            csv = st.session_state['bank_df'].to_csv(index=False).encode('utf-8')
             st.download_button("⬇️ Download Bank Data", data=csv, file_name="categorized_bank_transactions.csv", mime="text/csv", key="dl_bank")
         with col2:
             if st.button("☁️ Sync Transactions to Accounts"):
@@ -607,8 +599,36 @@ with main_tab2:
                         except:
                             pass
                             
-                        df_upload = edited_bank_df.fillna("")
-                        accounts = df_upload['Account'].unique()
+                        # Use the state df which has the category column for download if needed, but for sync, map to the new columns
+                        df_upload = st.session_state['bank_df'].fillna("")
+                        
+                        # Prepare the upload payload according to the new structure
+                        upload_payload = df_upload.copy()
+                        # Rename Code and Amount to Code1 and Amount1
+                        upload_payload = upload_payload.rename(columns={'Code': 'Code1', 'Amount': 'Amount1'})
+                        # Ensure 'Amount' (the source of truth) exists in the payload, mirroring Amount1
+                        upload_payload.insert(5, 'Amount', upload_payload['Amount1'])
+                        
+                        # Add empty columns for the horizontal coding breakdown
+                        new_cols = ['Code2', 'Amount2', 'Code3', 'Amount3', 'Code4', 'Amount4', 'Code5', 'Amount5']
+                        for col in new_cols:
+                            upload_payload[col] = ""
+                            
+                        # Drop Category column from the upload payload
+                        if 'Category' in upload_payload.columns:
+                            upload_payload = upload_payload.drop(columns=['Category'])
+                            
+                        # Reorder columns to exactly match the requested template
+                        final_order = ["Date", "Unique ID", "Account", "Bank", "Payee / Description", "Amount", "Code1", "Amount1", "Code2", "Amount2", "Code3", "Amount3", "Code4", "Amount4", "Code5", "Amount5"]
+                        
+                        # Ensure all columns exist before reordering
+                        for col in final_order:
+                            if col not in upload_payload.columns:
+                                upload_payload[col] = ""
+                                
+                        upload_payload = upload_payload[final_order]
+                        
+                        accounts = upload_payload['Account'].unique()
                         
                         synced_count = 0
                         skipped_count = 0
@@ -621,11 +641,11 @@ with main_tab2:
                                 worksheet = spreadsheet.worksheet(tab_name) 
                             except gspread.exceptions.WorksheetNotFound:
                                 worksheet = spreadsheet.add_worksheet(title=tab_name, rows="1000", cols="20")
-                                worksheet.append_row(list(df_upload.columns))
+                                worksheet.append_row(list(upload_payload.columns) + ["Unallocated", "TotalCoded"])
                             
-                            existing_ids = worksheet.col_values(2)
+                            existing_ids = worksheet.col_values(2) # Col 2 is Unique ID
                             
-                            acc_df = df_upload[df_upload['Account'] == acc]
+                            acc_df = upload_payload[upload_payload['Account'] == acc]
                             new_rows = acc_df[~acc_df['Unique ID'].astype(str).isin(existing_ids)]
                             
                             skipped_count += (len(acc_df) - len(new_rows))
