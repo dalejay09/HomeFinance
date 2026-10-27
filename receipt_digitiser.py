@@ -8,6 +8,7 @@ from google.oauth2.service_account import Credentials
 import fitz  # PyMuPDF for PDF processing
 import io
 import hashlib
+from datetime import datetime, timedelta
 
 # ==========================================
 # 1. DEFAULT FALLBACK CATEGORY DICTIONARY
@@ -118,14 +119,17 @@ def resize_image(image, max_size=(1024, 1024)):
     image.thumbnail(max_size, Image.Resampling.LANCZOS)
     return image
 
+@st.cache_resource
+def get_gs_client():
+    creds_dict = json.loads(st.secrets["GCP_JSON_STRING"])
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+    return gspread.authorize(creds)
+
 @st.cache_data(ttl=300)
 def fetch_dynamic_categories():
     try:
-        creds_dict = json.loads(st.secrets["GCP_JSON_STRING"])
-        scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
-        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-        client = gspread.authorize(creds)
-        
+        client = get_gs_client()
         sheet_id = st.secrets["SPREADSHEET_ID"]
         spreadsheet = client.open_by_key(sheet_id)
         worksheet = spreadsheet.worksheet("coding")
@@ -289,6 +293,30 @@ def apply_missing_ids(df):
     df['Unique ID'] = ids
     return df
 
+def assign_receipt_ids(df):
+    if df.empty: return df
+    
+    # We want a deterministic hash based on Store, Date, and Receipt Total
+    # so that multi-page receipts stitched by the AI get the exact same ID.
+    ids = []
+    for _, row in df.iterrows():
+        store = str(row.get('Store Name', '')).strip().lower()
+        date = str(row.get('Date', '')).strip()
+        try:
+            total = float(row.get('Receipt Total', 0))
+            total_str = f"{total:.2f}"
+        except:
+            total_str = str(row.get('Receipt Total', ''))
+            
+        raw = f"{store}_{date}_{total_str}"
+        ids.append("r-" + hashlib.md5(raw.encode()).hexdigest()[:8])
+        
+    if 'Receipt ID' in df.columns:
+        df['Receipt ID'] = ids
+    else:
+        df.insert(0, 'Receipt ID', ids)
+    return df
+
 # ==========================================
 # 4. STREAMLIT APP LAYOUT & LOGIC
 # ==========================================
@@ -299,7 +327,7 @@ if not ALL_CODES_MAP:
     ALL_CODES_MAP = DEFAULT_ALL_CODES_MAP
 VALID_CODES = list(ALL_CODES_MAP.keys())
 
-main_tab1, main_tab2 = st.tabs(["🧾 Receipt Digitizer", "🏦 Bank Statements"])
+main_tab1, main_tab2, main_tab3 = st.tabs(["🧾 Receipt Digitizer", "🏦 Bank Statements", "🔄 Reconciliation"])
 
 # ---------------------------------------------------------
 # TAB 1: RECEIPT DIGITIZER
@@ -392,7 +420,10 @@ with main_tab1:
                     response = model.generate_content(payload)
                     raw_text = response.text.replace("```json", "").replace("```", "").strip()
                     data = json.loads(raw_text)
-                    st.session_state['receipt_df'] = pd.DataFrame(data)
+                    
+                    # Generate logical UUIDs before presenting to user
+                    raw_df = pd.DataFrame(data)
+                    st.session_state['receipt_df'] = assign_receipt_ids(raw_df)
                     st.success("Extraction complete!")
             except KeyError as e:
                 st.error(f"Missing Secret: Please ensure {e} is added to your Streamlit App Secrets.")
@@ -433,6 +464,7 @@ with main_tab1:
             num_rows="dynamic",
             key="receipt_editor",
             column_config={
+                "Receipt ID": st.column_config.TextColumn("Receipt ID", disabled=True),
                 "Code": st.column_config.SelectboxColumn("Code", options=VALID_CODES, required=True),
                 "Category": st.column_config.TextColumn("Category", disabled=True),
                 "Amount": st.column_config.NumberColumn("Amount", format="%.2f"),
@@ -455,15 +487,16 @@ with main_tab1:
             if st.button("☁️ Sync Receipts to Google Sheets"):
                 try:
                     with st.spinner("Connecting to Google Sheets..."):
-                        creds_dict = json.loads(st.secrets["GCP_JSON_STRING"])
-                        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-                        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-                        client = gspread.authorize(creds)
-                        
+                        client = get_gs_client()
                         sheet_id = st.secrets["SPREADSHEET_ID"]
                         spreadsheet = client.open_by_key(sheet_id)
-                        worksheet = spreadsheet.worksheet("receipts") 
                         
+                        try:
+                            worksheet = spreadsheet.worksheet("receipts") 
+                        except gspread.exceptions.WorksheetNotFound:
+                            worksheet = spreadsheet.add_worksheet(title="receipts", rows="1000", cols="20")
+                            worksheet.append_row(list(edited_receipt_df.columns))
+                            
                         df_upload = edited_receipt_df.fillna("")
                         worksheet.append_rows(df_upload.values.tolist())
                     st.success("✅ Receipts synced securely!")
@@ -541,7 +574,6 @@ with main_tab2:
     if 'bank_df' in st.session_state:
         st.subheader("2. Review & Edit Transactions")
         
-        # Display the DataFrame but exclude the redundant Category column visually
         display_df = st.session_state['bank_df'].copy()
         if 'Category' in display_df.columns:
             display_df = display_df.drop(columns=['Category'])
@@ -558,11 +590,9 @@ with main_tab2:
             }
         )
         
-        # We need to map the edited values back to the hidden 'Category' logic in state
         updated_state_df = edited_bank_df.copy()
         updated_state_df['Category'] = updated_state_df['Code'].map(ALL_CODES_MAP).fillna("")
         
-        # Ensure column order
         cols = list(updated_state_df.columns)
         if 'Category' in cols and 'Code' in cols:
             cols.remove('Category')
@@ -583,11 +613,7 @@ with main_tab2:
             if st.button("☁️ Sync Transactions to Accounts"):
                 try:
                     with st.spinner("Connecting to Google Sheets and routing accounts..."):
-                        creds_dict = json.loads(st.secrets["GCP_JSON_STRING"])
-                        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-                        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-                        client = gspread.authorize(creds)
-                        
+                        client = get_gs_client()
                         sheet_id = st.secrets["SPREADSHEET_ID"]
                         spreadsheet = client.open_by_key(sheet_id)
                         
@@ -599,29 +625,22 @@ with main_tab2:
                         except:
                             pass
                             
-                        # Use the state df which has the category column for download if needed, but for sync, map to the new columns
                         df_upload = st.session_state['bank_df'].fillna("")
                         
-                        # Prepare the upload payload according to the new structure
                         upload_payload = df_upload.copy()
-                        # Rename Code and Amount to Code1 and Amount1
                         upload_payload = upload_payload.rename(columns={'Code': 'Code1', 'Amount': 'Amount1'})
-                        # Ensure 'Amount' (the source of truth) exists in the payload, mirroring Amount1
                         upload_payload.insert(5, 'Amount', upload_payload['Amount1'])
                         
-                        # Add empty columns for the horizontal coding breakdown
                         new_cols = ['Code2', 'Amount2', 'Code3', 'Amount3', 'Code4', 'Amount4', 'Code5', 'Amount5']
                         for col in new_cols:
                             upload_payload[col] = ""
                             
-                        # Drop Category column from the upload payload
                         if 'Category' in upload_payload.columns:
                             upload_payload = upload_payload.drop(columns=['Category'])
                             
-                        # Reorder columns to exactly match the requested template
-                        final_order = ["Date", "Unique ID", "Account", "Bank", "Payee / Description", "Amount", "Code1", "Amount1", "Code2", "Amount2", "Code3", "Amount3", "Code4", "Amount4", "Code5", "Amount5"]
+                        # Notice Receipt ID at the end!
+                        final_order = ["Date", "Unique ID", "Account", "Bank", "Payee / Description", "Amount", "Code1", "Amount1", "Code2", "Amount2", "Code3", "Amount3", "Code4", "Amount4", "Code5", "Amount5", "Receipt ID"]
                         
-                        # Ensure all columns exist before reordering
                         for col in final_order:
                             if col not in upload_payload.columns:
                                 upload_payload[col] = ""
@@ -629,7 +648,6 @@ with main_tab2:
                         upload_payload = upload_payload[final_order]
                         
                         accounts = upload_payload['Account'].unique()
-                        
                         synced_count = 0
                         skipped_count = 0
                         
@@ -657,3 +675,224 @@ with main_tab2:
                     st.success(f"✅ Success! {synced_count} new transactions synced. {skipped_count} existing duplicates skipped.")
                 except Exception as e:
                     st.error(f"Failed to sync: {e}")
+
+# ---------------------------------------------------------
+# TAB 3: RECONCILIATION
+# ---------------------------------------------------------
+with main_tab3:
+    st.title("🔄 Receipt-to-Bank Reconciliation")
+    st.markdown("Match your saved receipts against your bank transactions to automatically split out the line-item coding.")
+    
+    def parse_dt(d_str):
+        try:
+            return datetime.strptime(str(d_str).strip(), '%d/%m/%Y')
+        except:
+            return datetime.min
+
+    if st.button("🔍 Scan for Matches", type="primary"):
+        with st.spinner("Scanning Google Sheets for unreconciled records..."):
+            try:
+                client = get_gs_client()
+                sheet_id = st.secrets["SPREADSHEET_ID"]
+                spreadsheet = client.open_by_key(sheet_id)
+                
+                # 1. Fetch Receipts
+                try:
+                    receipts_ws = spreadsheet.worksheet("receipts")
+                    receipts_df = pd.DataFrame(receipts_ws.get_all_records())
+                except gspread.exceptions.WorksheetNotFound:
+                    st.error("No 'receipts' tab found in Google Sheets. Have you synced any receipts yet?")
+                    st.stop()
+                    
+                if receipts_df.empty or 'Receipt ID' not in receipts_df.columns:
+                    st.warning("No receipts found or missing 'Receipt ID' column.")
+                    st.stop()
+
+                # 2. Determine Bank Tabs via routing (or fallback)
+                bank_tabs = []
+                try:
+                    routing_ws = spreadsheet.worksheet("routing")
+                    for row in routing_ws.get_all_records():
+                        t_name = str(row.get("Tab Name", "")).strip()
+                        if t_name and t_name not in bank_tabs:
+                            bank_tabs.append(t_name)
+                except:
+                    bank_tabs = ["bank_transactions"] # Fallback if no routing
+                    
+                # 3. Combine Bank Data
+                all_bank_rows = []
+                # Keep a mapping of tab -> worksheet object to update later
+                tab_worksheets = {}
+                for tab in bank_tabs:
+                    try:
+                        ws = spreadsheet.worksheet(tab)
+                        tab_worksheets[tab] = ws
+                        
+                        records = ws.get_all_records()
+                        for i, r in enumerate(records):
+                            # Offset by 2 (1 for 0-index, 1 for header)
+                            r['_sheet'] = tab
+                            r['_row'] = i + 2 
+                            all_bank_rows.append(r)
+                    except:
+                        pass
+                
+                bank_df = pd.DataFrame(all_bank_rows)
+                
+                if bank_df.empty:
+                    st.warning("No bank transactions found to reconcile.")
+                    st.stop()
+                    
+                # 4. Filter un-reconciled
+                if 'Receipt ID' not in bank_df.columns:
+                    bank_df['Receipt ID'] = ""
+                    
+                unreconciled_bank = bank_df[bank_df['Receipt ID'].astype(str).str.strip() == ""]
+                
+                # Identify which receipts have already been used in the bank tab
+                used_receipt_ids = set(bank_df[bank_df['Receipt ID'].astype(str).str.strip() != ""]['Receipt ID'].astype(str))
+                unreconciled_receipts = receipts_df[~receipts_df['Receipt ID'].astype(str).isin(used_receipt_ids)]
+                
+                if unreconciled_bank.empty:
+                    st.success("All bank transactions are currently reconciled!")
+                    st.stop()
+                if unreconciled_receipts.empty:
+                    st.success("No new receipts available to match.")
+                    st.stop()
+
+                # 5. Group Receipts by logical ID
+                matches = []
+                grouped_receipts = unreconciled_receipts.groupby('Receipt ID')
+                
+                for r_id, group in grouped_receipts:
+                    r_date_str = str(group['Date'].iloc[0])
+                    r_store = str(group['Store Name'].iloc[0])
+                    r_total = float(group['Receipt Total'].iloc[0]) if str(group['Receipt Total'].iloc[0]).strip() else 0.0
+                    r_date = parse_dt(r_date_str)
+                    
+                    if r_total == 0: continue
+                    
+                    # Find candidates in bank transactions
+                    for _, b_row in unreconciled_bank.iterrows():
+                        try:
+                            b_amt = abs(float(str(b_row['Amount']).replace(',', '')))
+                        except:
+                            continue
+                            
+                        b_date = parse_dt(b_row['Date'])
+                        
+                        # Match Criteria: Exact absolute amount, within 4 days (to allow for weekends/public holidays processing)
+                        if abs(b_amt - r_total) < 0.01:
+                            if abs((b_date - r_date).days) <= 4:
+                                
+                                # Generate Breakdown
+                                breakdown = group.groupby('Code')['Amount'].sum().reset_index()
+                                breakdown = breakdown.sort_values(by='Amount', ascending=False)
+                                
+                                codes = breakdown['Code'].tolist()
+                                amounts = breakdown['Amount'].tolist()
+                                
+                                match_data = {
+                                    'Bank_Unique_ID': b_row['Unique ID'],
+                                    'Bank_Sheet': b_row['_sheet'],
+                                    'Bank_Row': b_row['_row'],
+                                    'Bank_Date': b_row['Date'],
+                                    'Bank_Payee': b_row['Payee / Description'],
+                                    'Bank_Amount': b_row['Amount'],
+                                    'Receipt_ID': r_id,
+                                    'Receipt_Store': r_store,
+                                    'Receipt_Date': r_date_str,
+                                    'Receipt_Total': r_total,
+                                    'New_Codes': codes,
+                                    'New_Amounts': amounts
+                                }
+                                matches.append(match_data)
+                                break # Stop looking for this receipt once matched
+
+                if not matches:
+                    st.info("No matching pairs found based on Amount and Date (+/- 4 days).")
+                else:
+                    st.session_state['pending_matches'] = matches
+                    st.success(f"Found {len(matches)} proposed match(es)!")
+
+            except Exception as e:
+                st.error(f"Error during scan: {e}")
+
+    # Display pending matches
+    if 'pending_matches' in st.session_state and st.session_state['pending_matches']:
+        st.write("### Review Suggested Matches")
+        
+        to_commit = []
+        
+        for idx, match in enumerate(st.session_state['pending_matches']):
+            with st.expander(f"🤝 Match: {match['Receipt_Store']} (${match['Receipt_Total']:.2f}) -> {match['Bank_Payee']} on {match['Bank_Date']}", expanded=True):
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.markdown("**🧾 Receipt Details**")
+                    st.write(f"**Store:** {match['Receipt_Store']}")
+                    st.write(f"**Date:** {match['Receipt_Date']}")
+                    st.write(f"**Total:** ${match['Receipt_Total']:.2f}")
+                    st.write(f"**Receipt ID:** `{match['Receipt_ID']}`")
+                with col2:
+                    st.markdown("**🏦 Bank Transaction**")
+                    st.write(f"**Payee:** {match['Bank_Payee']}")
+                    st.write(f"**Date:** {match['Bank_Date']}")
+                    st.write(f"**Amount:** ${match['Bank_Amount']}")
+                    st.write(f"**Unique ID:** `{match['Bank_Unique_ID']}`")
+                    
+                st.markdown("**Proposed Split Coding:**")
+                split_df = pd.DataFrame({'Code': match['New_Codes'], 'Amount': match['New_Amounts']})
+                st.dataframe(split_df, hide_index=True)
+                
+                if st.checkbox(f"Confirm Match #{idx+1}", key=f"conf_{idx}"):
+                    to_commit.append(match)
+
+        if to_commit:
+            st.write("---")
+            if st.button("💾 Execute Selected Reconciliations", type="primary"):
+                try:
+                    with st.spinner("Updating Google Sheets..."):
+                        client = get_gs_client()
+                        sheet_id = st.secrets["SPREADSHEET_ID"]
+                        spreadsheet = client.open_by_key(sheet_id)
+                        
+                        for match in to_commit:
+                            # 1. Fetch the exact sheet
+                            ws = spreadsheet.worksheet(match['Bank_Sheet'])
+                            row_idx = match['Bank_Row']
+                            
+                            # 2. We need to update specific cells. 
+                            # Since we don't know the exact absolute column indexes easily due to dynamic user edits, 
+                            # the safest way is to fetch the header row and map columns.
+                            headers = ws.row_values(1)
+                            
+                            updates = []
+                            # Receipt ID
+                            if "Receipt ID" in headers:
+                                col_letter = gspread.utils.rowcol_to_a1(1, headers.index("Receipt ID") + 1)[0]
+                                updates.append({'range': f'{col_letter}{row_idx}', 'values': [[match['Receipt_ID']]]})
+                            
+                            # Codes and Amounts
+                            for i in range(5):
+                                c_val = match['New_Codes'][i] if i < len(match['New_Codes']) else ""
+                                a_val = match['New_Amounts'][i] if i < len(match['New_Amounts']) else ""
+                                
+                                c_col = f"Code{i+1}"
+                                a_col = f"Amount{i+1}"
+                                
+                                if c_col in headers:
+                                    col_letter = gspread.utils.rowcol_to_a1(1, headers.index(c_col) + 1)[:-1]
+                                    updates.append({'range': f'{col_letter}{row_idx}', 'values': [[c_val]]})
+                                if a_col in headers:
+                                    col_letter = gspread.utils.rowcol_to_a1(1, headers.index(a_col) + 1)[:-1]
+                                    updates.append({'range': f'{col_letter}{row_idx}', 'values': [[a_val]]})
+                            
+                            if updates:
+                                ws.batch_update(updates)
+                                
+                        st.success(f"✅ Successfully applied {len(to_commit)} reconciliations to the Bank tabs!")
+                        # Clear state to force refresh
+                        del st.session_state['pending_matches']
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to execute updates: {e}")
