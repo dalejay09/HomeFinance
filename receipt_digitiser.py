@@ -866,10 +866,18 @@ with main_tab3:
                             
                             headers = ws.row_values(1)
                             
+                            # Fallback: Instead of relying on strict header match, check common variations
+                            # If that fails, just append it to the end of the headers list.
+                            receipt_col_name = None
+                            for possible_header in ["Receipt ID", "Receipt Id", "Receipt_ID", "Receipt ID "]:
+                                if possible_header in headers:
+                                    receipt_col_name = possible_header
+                                    break
+                            
                             updates = []
                             # Update Receipt ID column
-                            if "Receipt ID" in headers:
-                                col_letter = gspread.utils.rowcol_to_a1(1, headers.index("Receipt ID") + 1)[0]
+                            if receipt_col_name:
+                                col_letter = gspread.utils.rowcol_to_a1(1, headers.index(receipt_col_name) + 1)[0]
                                 updates.append({'range': f'{col_letter}{row_idx}', 'values': [[match['Receipt_ID']]]})
                             
                             # Codes and Amounts
