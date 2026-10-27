@@ -638,7 +638,6 @@ with main_tab2:
                         if 'Category' in upload_payload.columns:
                             upload_payload = upload_payload.drop(columns=['Category'])
                             
-                        # Notice Receipt ID at the end!
                         final_order = ["Date", "Unique ID", "Account", "Bank", "Payee / Description", "Amount", "Code1", "Amount1", "Code2", "Amount2", "Code3", "Amount3", "Code4", "Amount4", "Code5", "Amount5", "Receipt ID"]
                         
                         for col in final_order:
@@ -721,7 +720,6 @@ with main_tab3:
                     
                 # 3. Combine Bank Data
                 all_bank_rows = []
-                # Keep a mapping of tab -> worksheet object to update later
                 tab_worksheets = {}
                 for tab in bank_tabs:
                     try:
@@ -749,7 +747,6 @@ with main_tab3:
                     
                 unreconciled_bank = bank_df[bank_df['Receipt ID'].astype(str).str.strip() == ""]
                 
-                # Identify which receipts have already been used in the bank tab
                 used_receipt_ids = set(bank_df[bank_df['Receipt ID'].astype(str).str.strip() != ""]['Receipt ID'].astype(str))
                 unreconciled_receipts = receipts_df[~receipts_df['Receipt ID'].astype(str).isin(used_receipt_ids)]
                 
@@ -775,14 +772,16 @@ with main_tab3:
                     # Find candidates in bank transactions
                     for _, b_row in unreconciled_bank.iterrows():
                         try:
-                            b_amt = abs(float(str(b_row['Amount']).replace(',', '')))
+                            # Keep original sign for later logic
+                            b_amt_raw = float(str(b_row['Amount']).replace(',', ''))
+                            b_amt_abs = abs(b_amt_raw)
                         except:
                             continue
                             
                         b_date = parse_dt(b_row['Date'])
                         
-                        # Match Criteria: Exact absolute amount, within 4 days (to allow for weekends/public holidays processing)
-                        if abs(b_amt - r_total) < 0.01:
+                        # Match Criteria: Exact absolute amount, within 4 days
+                        if abs(b_amt_abs - r_total) < 0.01:
                             if abs((b_date - r_date).days) <= 4:
                                 
                                 # Generate Breakdown
@@ -791,6 +790,10 @@ with main_tab3:
                                 
                                 codes = breakdown['Code'].tolist()
                                 amounts = breakdown['Amount'].tolist()
+                                
+                                # Apply original bank sign to split amounts
+                                sign = 1 if b_amt_raw > 0 else -1
+                                amounts = [a * sign for a in amounts]
                                 
                                 match_data = {
                                     'Bank_Unique_ID': b_row['Unique ID'],
@@ -861,13 +864,10 @@ with main_tab3:
                             ws = spreadsheet.worksheet(match['Bank_Sheet'])
                             row_idx = match['Bank_Row']
                             
-                            # 2. We need to update specific cells. 
-                            # Since we don't know the exact absolute column indexes easily due to dynamic user edits, 
-                            # the safest way is to fetch the header row and map columns.
                             headers = ws.row_values(1)
                             
                             updates = []
-                            # Receipt ID
+                            # Update Receipt ID column
                             if "Receipt ID" in headers:
                                 col_letter = gspread.utils.rowcol_to_a1(1, headers.index("Receipt ID") + 1)[0]
                                 updates.append({'range': f'{col_letter}{row_idx}', 'values': [[match['Receipt_ID']]]})
