@@ -728,7 +728,6 @@ with main_tab3:
                         
                         records = ws.get_all_records()
                         for i, r in enumerate(records):
-                            # Offset by 2 (1 for 0-index, 1 for header)
                             r['_sheet'] = tab
                             r['_row'] = i + 2 
                             all_bank_rows.append(r)
@@ -741,11 +740,26 @@ with main_tab3:
                     st.warning("No bank transactions found to reconcile.")
                     st.stop()
                     
-                # 4. Filter un-reconciled
-                if 'Receipt ID' not in bank_df.columns:
+                # --- NEW LOGIC: Normalize Receipt ID column ---
+                receipt_col_variants = ["receipt id", "receipt_id", "receiptid"]
+                actual_receipt_col = next((col for col in bank_df.columns if str(col).lower().strip() in receipt_col_variants), None)
+                if actual_receipt_col and actual_receipt_col != 'Receipt ID':
+                    bank_df = bank_df.rename(columns={actual_receipt_col: 'Receipt ID'})
+                elif not actual_receipt_col:
                     bank_df['Receipt ID'] = ""
                     
-                unreconciled_bank = bank_df[bank_df['Receipt ID'].astype(str).str.strip() == ""]
+                # --- NEW LOGIC: Check for Reconciled/Status flag ---
+                recon_col_variants = ["reconciled", "status", "done", "coded"]
+                actual_recon_col = next((col for col in bank_df.columns if str(col).lower().strip() in recon_col_variants), None)
+                
+                if actual_recon_col:
+                    # Filter out anything marked as 'yes', 'true', '1', etc.
+                    unreconciled_mask = ~bank_df[actual_recon_col].astype(str).str.strip().str.lower().isin(['true', 'yes', 'y', '1', 'done'])
+                    unreconciled_bank = bank_df[unreconciled_mask]
+                    # Also filter out anything that has a receipt ID
+                    unreconciled_bank = unreconciled_bank[unreconciled_bank['Receipt ID'].astype(str).str.strip() == ""]
+                else:
+                    unreconciled_bank = bank_df[bank_df['Receipt ID'].astype(str).str.strip() == ""]
                 
                 used_receipt_ids = set(bank_df[bank_df['Receipt ID'].astype(str).str.strip() != ""]['Receipt ID'].astype(str))
                 unreconciled_receipts = receipts_df[~receipts_df['Receipt ID'].astype(str).isin(used_receipt_ids)]
@@ -866,19 +880,20 @@ with main_tab3:
                             
                             headers = ws.row_values(1)
                             
-                            # Fallback: Instead of relying on strict header match, check common variations
-                            # If that fails, just append it to the end of the headers list.
-                            receipt_col_name = None
-                            for possible_header in ["Receipt ID", "Receipt Id", "Receipt_ID", "Receipt ID "]:
-                                if possible_header in headers:
-                                    receipt_col_name = possible_header
-                                    break
+                            # Fallback checks for column names
+                            receipt_col_name = next((col for col in headers if str(col).lower().strip() in ["receipt id", "receipt_id", "receiptid"]), None)
+                            recon_col_name = next((col for col in headers if str(col).lower().strip() in ["reconciled", "status", "done", "coded"]), None)
                             
                             updates = []
                             # Update Receipt ID column
                             if receipt_col_name:
-                                col_letter = gspread.utils.rowcol_to_a1(1, headers.index(receipt_col_name) + 1)[0]
+                                col_letter = gspread.utils.rowcol_to_a1(1, headers.index(receipt_col_name) + 1)[:-1]
                                 updates.append({'range': f'{col_letter}{row_idx}', 'values': [[match['Receipt_ID']]]})
+                                
+                            # Auto-tick Reconciled column if it exists
+                            if recon_col_name:
+                                col_letter = gspread.utils.rowcol_to_a1(1, headers.index(recon_col_name) + 1)[:-1]
+                                updates.append({'range': f'{col_letter}{row_idx}', 'values': [["TRUE"]]})
                             
                             # Codes and Amounts
                             for i in range(5):
